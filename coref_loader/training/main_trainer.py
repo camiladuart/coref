@@ -1,22 +1,36 @@
-#treina e imprime instancias
+#imprime instâncias do dataset (um resumo por documento)
 
+import argparse
 from pathlib import Path
-from coref import CorefDataset
+from coref_loader.data import CorefDataset
+
+def count_tokens(sentences):
+    return sum(len(s) for s in sentences)
 
 def main():
-    processed_dir = r"C:\Users\PC\coref_data\ontonotes" #!!!
-    split = "dev"  # ou "train"/"test"
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data_dir", required=True, help="Pasta que contém *.english.jsonlines")
+    ap.add_argument("--split", default="dev", choices=["train", "dev", "test"],
+                    help="Qual arquivo abrir (train/dev/test)")
+    ap.add_argument("--limit", type=int, default=20, help="Quantos docs imprimir (0 = todos)")
+    ap.add_argument("--preview", type=int, default=12, help="Qtde de tokens para prévia da 1ª sentença")
+    args = ap.parse_args()
 
-    ds = CorefDataset(processed_dir, split)
-    print(f"[OK] carregado: {len(ds)} documentos ({split})\n")
+    ds = CorefDataset(args.data_dir, args.split)
+    print(f"[OK] carregado: {len(ds)} documentos ({args.split})\n")
 
-    # imprime cada instância (doc)
-    for i, doc in enumerate(ds.samples):
+    n = len(ds) if args.limit == 0 else min(args.limit, len(ds))
+    for i in range(n):
+        doc = ds[i]
         doc_key = doc["doc_key"]
-        n_sent  = len(doc["sentences"])
-        n_toks  = sum(len(s) for s in doc["sentences"])
-        n_clust = len(doc.get("clusters", []))
-        print(f"[{i:05d}] {doc_key} | sentenças: {n_sent} | tokens: {n_toks} | clusters: {n_clust}")
+        nsents = len(doc["sentences"])
+        ntoks = count_tokens(doc["sentences"])
+        nclus = len(doc.get("clusters", []))
+        preview = " ".join(doc["sentences"][0][:args.preview]) if nsents else ""
+        print(f"[{i:05d}] {doc_key} | sentenças: {nsents} | tokens_total: {ntoks} | clusters: {nclus}")
+        if preview:
+            print(f"       1ª sentença: {preview}")
+    print("\n[done]")
 
 if __name__ == "__main__":
     main()
