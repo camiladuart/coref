@@ -4,8 +4,7 @@ from pathlib import Path
 from coref import CorefDataset
 
 def main():
-    # ajuste o caminho para onde você salvou os jsonlines
-    processed_dir = r"C:\Users\PC\coref_data\ontonotes"
+    processed_dir = r"C:\Users\PC\coref_data\ontonotes" #!!!
     split = "dev"  # ou "train"/"test"
 
     ds = CorefDataset(processed_dir, split)
