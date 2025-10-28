@@ -1,28 +1,38 @@
-#code to load jsonlines from coref datasets
+# loader de JSONLines
 
 import json
 from pathlib import Path
+from typing import List, Dict, Any
 
-class CorefDataset: #class to read and load coref data in jsonlines format. each line is a document with: doc_key (name), sentences (tokens list), clusters (groups of mentions).
+class CorefDataset: ## lê arqs jsonlines do ontonotes. cada linha: {"doc_key", "sentences", "speakers"(opcional), "clusters"(opcional)}
 
-    def __init__(self, data_dir, split): #initialize dataset. param data_dir = folder with jsonlines files; param split = train/dev/test.
+    def __init__(self, data_dir: str, split: str): #data_dir: pasta com {train,dev,test}.english.jsonlines; split: "train", "dev" ou "test"
         self.data_dir = Path(data_dir)
         self.split = split
-        self.samples = self._load_jsonlines()
+        self.samples: List[Dict[str, Any]] = self._load_jsonlines()
 
-    def _load_jsonlines(self): #reads jsonlines file and returns a list of dictionnaires (one by document)
-        file_path = self.data_dir / f"{self.split}.english.jsonlines"
-        if not file_path.exists():
-            raise FileNotFoundError(f"Arquivo não encontrado: {file_path}")
+    def _load_jsonlines(self) -> List[Dict[str, Any]]:
+        path = self.data_dir / f"{self.split}.english.jsonlines"
+        if not path.exists():
+            raise FileNotFoundError(f"Não encontrei: {path}")
         docs = []
-        with open(file_path, "r", encoding="utf-8") as f:
+        with path.open("r", encoding="utf-8") as f:
             for line in f:
-                data = json.loads(line)
-                docs.append(data)
+                line = line.strip()
+                if not line:
+                    continue
+                d = json.loads(line)
+                #cada doc precisa ter doc_key e sentences. senao, mensagem de erro:
+                if "doc_key" not in d or "sentences" not in d:
+                    raise ValueError(f"JSON inválido (faltam campos): {d}")
+                # campos opcionais: valor padrao [], -
+                d.setdefault("clusters", [])
+                d.setdefault("speakers", [["-"] * len(s) for s in d["sentences"]])
+                docs.append(d) #acrescenta cada doc em docs e retorna a lista completa
         return docs
 
-    def __len__(self): #returns number of documents
-        return len(self.samples)
+    def __len__(self) -> int:
+        return len(self.samples) #len p saber quantos docs há
 
-    def __getitem__(self, idx): #allows to access a document by its index (ex: dataset[0])
-        return self.samples[idx]
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        return self.samples[idx] #retorna o primeiro documento
