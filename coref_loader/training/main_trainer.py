@@ -1,4 +1,5 @@
 #imprime instâncias do dataset
+#terminal: python -m coref_loader.training.main_trainer --data_dir "C:\Users\PC\coref_data\ontonotes_onf" --split dev --limit 5 --preview 10
     
 #dificuldades: 
 #tentei usar o dataset original do OntoNotes, com o codigo ontonotes_to_jsonlines.py, mas tive problemas com formatos: ele vem em formato .onf e o ontonotes-db-tool oficial é em Python 2, então não consegui importar.
