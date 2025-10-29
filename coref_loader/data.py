@@ -6,7 +6,7 @@ from typing import List, Dict, Any
 
 class CorefDataset: ## lê arqs jsonlines do ontonotes. cada linha: {"doc_key", "sentences", "speakers"(opcional), "clusters"(opcional)}
 
-    def __init__(self, data_dir: str, split: str): #data_dir: pasta com {train,dev,test}.english.jsonlines; split: "train", "dev" ou "test"
+    def __init__(self, data_dir: str, split: str): #data_dir: pasta com arq.english.jsonlines; split: "train", "dev" ou "test"
         self.data_dir = Path(data_dir)
         self.split = split
         self.samples: List[Dict[str, Any]] = self._load_jsonlines()
