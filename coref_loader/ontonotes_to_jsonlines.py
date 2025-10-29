@@ -6,6 +6,7 @@ converte ontonotes para jsonlines (1 documento por linha). saída por doc:
   "speakers":  [["-","-"], ["-","-","-"]], 
   "clusters":  [[[i1, j1], [i2, j2]], ...]  
 }
+!!! nao usei por causa do formato do dataset
 """
 
 import os
