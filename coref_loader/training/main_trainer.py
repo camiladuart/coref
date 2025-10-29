@@ -1,4 +1,9 @@
 #imprime instâncias do dataset
+    #dificuldades: tentei usar o dataset original do OntoNotes, com o codigo ontonotes_to_jsonlines.py, mas ele vem em formato .onf e o ontonotes-db-tool oficial é em *Python 2*, então não consegui importar.
+    #mudei de plano e passei a testar com arquivos .jsonlines criados manualmente.
+    #setup inicial: tive muitos erros de ambiente (versões de python, tensorflow, etc) -> resolvi criando um ambiente limpo (python 3.7) e instalando manualmente o que precisava.
+    #imports e estrutura: o python não encontrava o pacote coref_loader -> resolvi rodando o trainer como módulo (python -m coref_loader.training.main_trainer).
+    # roda 100% em Python 3; consigo ler e imprimir instâncias do dataset no formato .jsonlines; o código está sem dependências antigas (tensorflow, pytorch, etc.)
 
 import argparse
 from pathlib import Path
