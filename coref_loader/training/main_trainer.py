@@ -1,4 +1,4 @@
-#imprime instâncias do dataset (um resumo por documento)
+#imprime instâncias do dataset
 
 import argparse
 from pathlib import Path
