@@ -1,6 +1,6 @@
-# onf_to_jsonlines_balanced.py
+# onf_to_jsonlines.py -> codigo final!!!
 # Converte OntoNotes .onf -> JSONLines (doc_key + sentences). Sem clusters.
-# Não usa o pacote "on". Funciona em Python 3 (erros anteriores!!!)
+# Não usa o pacote "on". Funciona em Python 3 (erros anteriores!!!). 
 
 import json
 import re
@@ -48,7 +48,6 @@ def tokens_from_tree(tree_str: str) -> List[str]:
 def parse_onf_file(path: Path) -> Tuple[str, List[List[str]]]:
     """
     Lê um .onf, encontra árvores PTB e devolve (doc_key, [sent1, sent2, ...]),
-    onde cada sentença é lista de tokens.
     """
     text = path.read_text(encoding="utf-8", errors="ignore")
     trees = extract_trees(text)
