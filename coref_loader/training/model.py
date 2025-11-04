@@ -16,10 +16,16 @@ class CorefModel(nn.Module): #nn.Modulo do torch.nn -> lidar com classes com cam
         self.config = config #config dicionario com hiperparametros
         self.max_segment_len = config.get("max_segment_len", 512) #dividir doc em segmentos (BERT limite 512 tokens)
         self.max_span_width = config.get("max_span_width", 30) #importante p limitar o tamanho de cada candidato
+        #removi:
+        #self.genres: além do que preciso para as minhas tarefas
+        #.subtoken_maps pq é da pipeline de dados -> modelo vai receber já os tensores prontos
+        #.gold (gold labels - anotaçoes verdadeiras - o modelo recebe no max como entrada p calcular loss)
+        #self.eval_data = None: dados de avaliação -> nao pertencem à classe do modelo
 
-        # 2) encoder de linguagem
+        #bert_config -> alterei para Transformers (nao preciso de um json separado)
         self.encoder = AutoModel.from_pretrained(config["encoder_name"])
         hidden_size = self.encoder.config.hidden_size  # ex.: 768 para BERT base
+        #removi: self.tokenizer
 
         # 3) dimensão da representação de span: start + end + width_emb
         span_width_emb_size = config.get("span_width_emb_size", 20)
