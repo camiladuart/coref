@@ -1,3 +1,4 @@
+#baseado no independent.py
 import os
 import random
 import json
@@ -27,6 +28,12 @@ class CorefModel(nn.Module): #nn.Modulo do torch.nn -> lidar com classes com cam
         hidden_size = self.encoder.config.hidden_size  # ex.: 768 para BERT base
         #removi: self.tokenizer
 
+        #bloco de input_props.append do tensorflow antigo -> (pytorch) ao inves disso, vou definir as entradas diretamente nas funçoes:
+        # input_ids [B,T], attention_mask [B,T], span_starts [N], span_ends [N], span_batch_idx [N]
+
+        #placeholders e filas (PaddingFIFOQueue) -> removi para o pytorch (dataloader + chamar função)
+        #removi o self.get_predictions_and_loss pq o trainer vai chamar
+        
         # 3) dimensão da representação de span: start + end + width_emb
         span_width_emb_size = config.get("span_width_emb_size", 20)
         self.width_embeddings = nn.Embedding(self.max_span_width + 1, span_width_emb_size)
