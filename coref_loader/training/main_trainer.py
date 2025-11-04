@@ -27,7 +27,18 @@ def main():
 
     ds = CorefDataset(args.data_dir, args.split) #criao conjunto de dados com os args passados
     print(f"[OK] carregado: {len(ds)} documentos ({args.split})\n") #imprime n de docs que foram carregados
+'''
+from coref_loader.training.model import CorefModel
 
+config = {
+    "encoder_name": "bert-base-cased",   #escolhendo modelo
+    "max_segment_len": 512,
+    "max_span_width": 30,
+    "dropout": 0.2
+}
+
+model = CorefModel(config)
+'''
     n = len(ds) if args.limit == 0 else min(args.limit, len(ds)) #pra saber quantos imprimir: 0 = todos / menor limite entre o pedido e o n total
     for i in range(n): #infos basicas do doc:
         doc = ds[i]
