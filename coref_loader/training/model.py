@@ -1,18 +1,14 @@
 #baseado no independent.py
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from transformers import AutoModel
 
 class CorefModel(nn.Module): #nn.Modulo do torch.nn -> lidar com classes com camadas e cálculos
     def __init__(self, config): #construtor:
         super().__init__() #chamar o inicializador da nn.Module
-        # 1) hiperparâmetros principais
         self.config = config #config dicionario com hiperparametros
-        self.max_segment_len = config.get("max_segment_len", 512) #dividir doc em segmentos (BERT limite 512 tokens)
-        self.max_span_width = config.get("max_span_width", 30) #importante p limitar o tamanho de cada candidato
         #removi:
-        #self.genres: além do que preciso para as minhas tarefas
+        #self.max_segment_len, self.max_span_width, self.genres, nao uso no modelo
         #.subtoken_maps pq é da pipeline de dados -> modelo vai receber já os tensores prontos
         #.gold (gold labels - anotaçoes verdadeiras - o modelo recebe no max como entrada p calcular loss)
         #self.eval_data = None: dados de avaliação -> nao pertencem à classe do modelo
@@ -38,6 +34,28 @@ class CorefModel(nn.Module): #nn.Modulo do torch.nn -> lidar com classes com cam
         #tvars, variable names é a inicialização de pesos via checkpoints TF -> removi pq o AutoModel.from_pretrained(config["encoder_name"]), ja carrega os pesos automaticamente (Hugging Face)
         #train/warmup/global steps e train_op
 
+    def forward(
+        self,
+        input_ids: torch.LongTensor,       
+        attention_mask: torch.LongTensor,  #coloquei tudo como entrada
+        span_starts: torch.LongTensor,     
+        span_ends: torch.LongTensor,       
+        span_batch_idx: torch.LongTensor  
+    ) -> torch.Tensor:                    
+       
+        outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask) 
+        token_emb = outputs.last_hidden_state  
+        #pegar vetor do token inicial e final 
+        start_vecs = token_emb[span_batch_idx, span_starts] 
+        end_vecs   = token_emb[span_batch_idx, span_ends]   
+        #representação: concatenação do início e do fim
+        span_emb = torch.cat([start_vecs, end_vecs], dim=-1)  
+        #calcula 1 logit (score) por span:
+        logits = self.mention_scorer(span_emb).squeeze(-1)   
+    
+        return logits #score
+
+
         '''funções que removi:
         1. start_enqueue_thread -> usa fila do tensorflow-> em PyTorch vira DataLoader no trainer
         2. restore -> restaura variáveis do TF a partir de um checkpoint-> aqui os pesos vem de AutoModel.from_pretrained(...)
@@ -48,7 +66,9 @@ class CorefModel(nn.Module): #nn.Modulo do torch.nn -> lidar com classes com cam
         6. tensorize_example -> TF + tokenizer dentro do modelo; aqui: tokenização por transformers.AutoTokenizer fora do modelo
         7. truncate_example-> corta o documento por número de sentenças e ajusta offsets de gold_starts/ends, sentence_map, etc.
             pode estar no DataLoader: em PyTorch, isso é feito antes de alimentar o modelo (se os exemplos ultrapassarem o limite)
-
+        8. get_dropout (desatualizada para pytorch) -> nn.Dropout
+        9. coarse_to_fine_pruning: para cada span escolhe um conjunto pequeno de antecedentes candidatos ->nao preciso para detecção de menções.
+        
         model sem leitura de arquivo, sem tokenizer, sem filas TF, sem restore, sem speaker/genre/cluster.
         '''
 
@@ -75,4 +95,3 @@ class CorefModel(nn.Module): #nn.Modulo do torch.nn -> lidar com classes com cam
         eq = (cand[:, None, :] == gold[None, :, :]).all(dim=-1)        # [N,M] compara todos os candidatos com todos os gold: eq[i, j] = True se o candidato i é igual ao gold j
         return eq.any(dim=1).long()                                     #p cada candidato i, verifica se ele bate com algum gold (linha i tem algum True?)
         #resultado final é um rotulo por candidato
-
