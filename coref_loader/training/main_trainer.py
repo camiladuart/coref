@@ -39,6 +39,10 @@ config = {
 
 model = CorefModel(config)
 '''
+
+'''
+out = model.get_prediction_and_loss(...tensores...)
+'''
     n = len(ds) if args.limit == 0 else min(args.limit, len(ds)) #pra saber quantos imprimir: 0 = todos / menor limite entre o pedido e o n total
     for i in range(n): #infos basicas do doc:
         doc = ds[i]
