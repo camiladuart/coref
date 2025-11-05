@@ -3,36 +3,20 @@ import torch
 import torch.nn as nn
 from transformers import AutoModel
 
-class CorefModel(nn.Module): #nn.Modulo do torch.nn -> lidar com classes com camadas e cálculos
-    def __init__(self, config): #construtor:
-        super().__init__() #chamar o inicializador da nn.Module
+class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com camadas e cálculos
+    def __init__(self, config): 
+        super().__init__()
         self.config = config #config dicionario com hiperparametros
-        #removi:
-        #self.max_segment_len, self.max_span_width, self.genres, nao uso no modelo
-        #.subtoken_maps pq é da pipeline de dados -> modelo vai receber já os tensores prontos
-        #.gold (gold labels - anotaçoes verdadeiras - o modelo recebe no max como entrada p calcular loss)
-        #self.eval_data = None: dados de avaliação -> nao pertencem à classe do modelo
-
-        #bert_config -> alterei para Transformers (nao preciso de um json separado). Encoder BERT:
-        self.encoder = AutoModel.from_pretrained(config["encoder_name"]) # carrega modelo pronto (bert-base-cased) da biblio transformers
+       
+        #bert_config -> alterei para Transformers. Encoder BERT:
+        self.encoder = AutoModel.from_pretrained(config["encoder_name"]) # carrega modelo pronto (bert-base-cased)
         hidden_size = self.encoder.config.hidden_size  #guarda o tamanho dos vetores - 768
-        #removi: self.tokenizer
 
         # span_emb = [start ; end]. Cada span é representado juntando [vetor_start ; vetor_end]
         span_emb_size = hidden_size * 2 #ex: 768 no BERT base
-        self.mention_scorer = nn.Linear(span_emb_size, 1) #cria uma camada linear que recebe esse vetor e devolve 1 numero só -> score 
+        self.mention_scorer = nn.Linear(span_emb_size, 1) #cria uma camada linear que recebe o vetor e devolve 1 numero só -> score 
             #score = quanto o modelo acha que aquele span é uma menção (numero alto = sim, baixo = não)
-
-
-
-        #bloco de input_props.append do tensorflow antigo -> (pytorch) ao inves disso, vou definir as entradas diretamente nas funçoes:
-        # input_ids [B,T], attention_mask [B,T], span_starts [N], span_ends [N], span_batch_idx [N]
-
-        #placeholders e filas (PaddingFIFOQueue) -> removi para o pytorch (dataloader + chamar função)
-        #removi o self.get_predictions_and_loss pq o trainer vai chamar
-
-        #tvars, variable names é a inicialização de pesos via checkpoints TF -> removi pq o AutoModel.from_pretrained(config["encoder_name"]), ja carrega os pesos automaticamente (Hugging Face)
-        #train/warmup/global steps e train_op
+      
 
     def forward(
         self,
@@ -56,24 +40,7 @@ class CorefModel(nn.Module): #nn.Modulo do torch.nn -> lidar com classes com cam
         return logits #score
 
 
-        '''funções que removi:
-        1. start_enqueue_thread -> usa fila do tensorflow-> em PyTorch vira DataLoader no trainer
-        2. restore -> restaura variáveis do TF a partir de um checkpoint-> aqui os pesos vem de AutoModel.from_pretrained(...)
-        3. tensorize_mentions-> recebe lista de menções [(start, end), ...] e devolve dois arrays starts, ends: aqui o modelo vai já com span_starts/span_ends (tensores).
-        4. tensorize_span_labels -> pega [(start, end, label_name), ...] e transforma em arrays + mapeia label_name ->id.
-            necessária para classes além de 0/1; por enquanto tenho mention/not-mention (0/1) -> get_candidate_labels ja resolve isso por (start,end).
-        5. get_speaker_dict- >cria um dicionário de speakers (não vou usar)
-        6. tensorize_example -> TF + tokenizer dentro do modelo; aqui: tokenização por transformers.AutoTokenizer fora do modelo
-        7. truncate_example-> corta o documento por número de sentenças e ajusta offsets de gold_starts/ends, sentence_map, etc.
-            pode estar no DataLoader: em PyTorch, isso é feito antes de alimentar o modelo (se os exemplos ultrapassarem o limite)
-        8. get_dropout (desatualizada para pytorch) -> nn.Dropout
-        9. coarse_to_fine_pruning: para cada span escolhe um conjunto pequeno de antecedentes candidatos ->nao preciso para detecção de menções.
-        
-        model sem leitura de arquivo, sem tokenizer, sem filas TF, sem restore, sem speaker/genre/cluster.
-        '''
-
-
-    #get_candidate_labels: alterei para implementação pytorch:
+    #get_candidate_labels: alterei para implementação pytorch
     def get_candidate_labels(
         self,
         candidate_starts: torch.LongTensor,  
@@ -81,7 +48,7 @@ class CorefModel(nn.Module): #nn.Modulo do torch.nn -> lidar com classes com cam
         labeled_starts: torch.LongTensor,  
         labeled_ends: torch.LongTensor      
     ) -> torch.LongTensor:                    
-        device = candidate_starts.device #onde os tensores estão para devolver no mesmo lugar
+        device = candidate_starts.device #device: onde os tensores estão para devolver no mesmo lugar
         N = candidate_starts.size(0) #n = quantidade de candidatos
         #recebe os inícios e finais dos candidatos e dos gold (mençoes verdadeiras)
 
@@ -95,3 +62,35 @@ class CorefModel(nn.Module): #nn.Modulo do torch.nn -> lidar com classes com cam
         eq = (cand[:, None, :] == gold[None, :, :]).all(dim=-1)        # [N,M] compara todos os candidatos com todos os gold: eq[i, j] = True se o candidato i é igual ao gold j
         return eq.any(dim=1).long()                                     #p cada candidato i, verifica se ele bate com algum gold (linha i tem algum True?)
         #resultado final é um rotulo por candidato
+
+    #tensorflow -> transformers
+    def get_prediction_and_loss(
+        self,
+        input_ids: torch.LongTensor,
+        attention_mask: torch.LongTensor,
+        span_starts: torch.LongTensor,
+        span_ends: torch.LongTensor,
+        span_batch_idx: torch.LongTensor,
+        mention_labels: torch.LongTensor = None  
+    ):
+        #logits = scores brutos (chamo o forward pra obter os logits de cada span)
+        logits = self.forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            span_starts=span_starts,
+            span_ends=span_ends,
+            span_batch_idx=span_batch_idx
+        ) 
+    
+        #loss=erro (compara verdadeiro com as predictions feitas)
+        loss = None #começa com loss vazia (se não houver rótulos, nao precisa calcular nada)
+        if mention_labels is not None:
+            loss = torch.nn.functional.binary_cross_entropy_with_logits(
+                logits, mention_labels.float()
+            ) #binary_cross_entropy_with_logits para comparar logits (notas brutas que o modelo deu) com mention_labels (rótulos verdadeiros) 
+                #e mede o quanto o modelo errou
+    
+        return {
+            "logits": logits,                 
+            "loss": loss                      
+        }
