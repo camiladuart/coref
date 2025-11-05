@@ -1,13 +1,11 @@
-# loader de JSONLines:
-# sem classes que herdam de torch.utils.data.Dataset -> como Seq2Seq; sem transformações, tokenização, ...
-# não herda nada -> classe pequena -> só lê, valida e entrega os documentos
-
+# loader de JSONLines
 import json
 from pathlib import Path
 from typing import List, Dict, Any
+import torch
+from typing import List, Tuple
 
 class CorefDataset: ## lê arqs jsonlines do ontonotes. cada linha: {"doc_key", "sentences", "speakers"(opcional), "clusters"(opcional)}
-
     def __init__(self, data_dir: str, split: str): #data_dir: pasta com arq.english.jsonlines; split: "train", "dev" ou "test"
         self.data_dir = Path(data_dir)
         self.split = split
@@ -34,7 +32,45 @@ class CorefDataset: ## lê arqs jsonlines do ontonotes. cada linha: {"doc_key", 
         return docs
 
     def __len__(self) -> int:
-        return len(self.samples) #len p saber quantos docs há
+        return len(self.samples) #quantos docs há
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         return self.samples[idx] #retorna o primeiro documento
+
+
+    #juntar todas as sentenças num único vetor de tokens + criar um sentence_map (lista-> a qual sentença pertence cada token):
+    def flatten_sentences(sentences: List[List[str]]) -> Tuple[List[str], List[int]]:
+        tokens = []
+        sentence_map = []
+        for s_idx, sent in enumerate(sentences):
+            tokens.extend(sent)
+            sentence_map.extend([s_idx] * len(sent))
+        return tokens, sentence_map
+
+    #gerar todos os spans (start,end) que nao cruzam sentença e tem largura <= max_span_width:
+    def build_candidates(sentence_map: List[int], max_span_width: int) -> Tuple[torch.LongTensor, torch.LongTensor]:
+        N = len(sentence_map)
+        starts = []
+        ends = []
+        for i in range(N): #for que vai aumentando o tamanho do span até max_span_width
+            for w in range(max_span_width):
+                j = i + w
+                if j >= N:
+                    break #passou do ultimo token, para
+                if sentence_map[i] == sentence_map[j]: #compara os dois sentence_maps:
+                    starts.append(i)                    #iguais = inicio e fim na mesma sentença -> span válido
+                    ends.append(j)                        #diferentes = j já está numa sentença diferente -> span cruzou sentenças -> parar
+                else:
+                    break  
+        if not starts: 
+            return torch.empty(0, dtype=torch.long), torch.empty(0, dtype=torch.long) ##se não encontrou nenhum span, retorna tensores vazios
+        return torch.tensor(starts, dtype=torch.long), torch.tensor(ends, dtype=torch.long) #se sim, transforma as listas starts e ends em tensores torch.LongTensor (pra usar no modelo)
+
+    def extract_gold_spans(example): #pega clusters do ontonotes e retorna (gold_starts, gold_ends) únicos
+        clusters = example.get("clusters", [])
+        gold = sorted({(m[0], m[1]) for c in clusters for m in c})
+        if not gold:
+            return torch.empty(0, dtype=torch.long), torch.empty(0, dtype=torch.long)
+        gold_starts = torch.tensor([s for s, _ in gold], dtype=torch.long)
+        gold_ends   = torch.tensor([e for _, e in gold], dtype=torch.long)
+        return gold_starts, gold_ends
