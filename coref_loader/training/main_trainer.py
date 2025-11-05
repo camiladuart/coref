@@ -8,39 +8,98 @@
 #imports e estrutura: o python não encontrava o pacote coref_loader -> resolvi rodando o trainer como módulo (python -m coref_loader.training.main_trainer).
 #roda 100% em Python 3; consigo ler e imprimir instâncias do dataset no formato .jsonlines; o código está sem dependências antigas (tensorflow, pytorch, etc.)
 
-import argparse #biblio p rodar o código direto no terminal
+import argparse
+import torch
 from pathlib import Path
-from coref_loader.data import CorefDataset
-
+from transformers import AutoTokenizer
+from coref_loader.data import CorefDataset, flatten_sentences, build_candidates, extract_gold_spans
 from coref_loader.training.model import CorefModel
-
-
-#contando quantos tokens existem no total em todas as sentences do doc:
-def count_tokens(sentences):
-    return sum(len(s) for s in sentences)
 
 def main():
     ap = argparse.ArgumentParser() #criando o leitor de argumentos. add os args que o programa vai aceitar:
-    ap.add_argument("--data_dir", required=True, help="Pasta que contém *.english.jsonlines") #precisa do datadir (qual pasta p abrir)
-    ap.add_argument("--split", default="dev", choices=["train", "dev", "test"], #define o split (qual arq -padrão é dev)
-                    help="Qual arquivo abrir (train/dev/test)")
-    ap.add_argument("--limit", type=int, default=20, help="Quantos docs imprimir (0 = todos)") #quantos docs quero ver
-    ap.add_argument("--preview", type=int, default=12, help="Qtde de tokens para prévia da 1ª sentença") #quantos tokens quero mostrar de exemplo
+    ap.add_argument("--data_dir", required=True, help="Pasta com *.english.jsonlines") #datadir
+    ap.add_argument("--split", default="dev", choices=["train", "dev", "test"]) #split: train/dev/test
+    ap.add_argument("--limit", type=int, default=10, help="Quantos docs usar (0 = todos)") #quantos docs quero ver
     args = ap.parse_args() #le o que foi digitado no terminal e guarda em args
 
-    ds = CorefDataset(args.data_dir, args.split) #criao conjunto de dados com os args passados
-    print(f"[OK] carregado: {len(ds)} documentos ({args.split})\n") #imprime n de docs que foram carregados
+    #config p escolher o modelo
+    config = {
+        "encoder_name": "bert-base-cased",
+        "max_span_width": 30,
+        "dropout": 0.2,
+    }
 
-model = CorefModel(config)
-For batch in ds: 
-Batch["input_ids"] 
-# loss=model(batch) 
-config = {
-    "encoder_name": "bert-base-cased",   #escolhendo modelo
-    "max_segment_len": 512,
-    "max_span_width": 30,
-    "dropout": 0.2
-}
+    ds = CorefDataset(args.data_dir, args.split) #dados
+    print(f"[OK] carregado: {len(ds)} documentos ({args.split})")
+
+    tokenizer = AutoTokenizer.from_pretrained(config["encoder_name"]) #tokenizer
+    model = CorefModel(config) #modelo
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+
+    #se for train: otimizador
+    if args.split == "train":
+        optim = torch.optim.AdamW(model.parameters(), lr=2e-5)
+
+    used = 0
+    model.train() if args.split == "train" else model.eval()
+
+    for ex in ds:
+        if args.limit and used >= args.limit:
+            break
+        used += 1
+
+        # 1) Achatar sentenças e construir sentence_map
+        tokens, sentence_map = flatten_sentences(ex["sentences"])
+
+        # 2) Tokenizar (sem especiais), mantendo 1-para-1 com tokens originais
+        enc = tokenizer(tokens, is_split_into_words=True, add_special_tokens=False, return_tensors="pt")
+        input_ids = enc["input_ids"]          # [1, T]
+        attention_mask = enc["attention_mask"]# [1, T]
+
+        # 3) Candidatos (não cruzam sentença, largura <= max_span_width)
+        span_starts, span_ends = build_candidates(sentence_map, config["max_span_width"])
+        if span_starts.numel() == 0:
+            print("Sem candidatos neste doc; pulando.")
+            continue
+        span_batch_idx = torch.zeros_like(span_starts)  # tudo no mesmo item do batch (B=1)
+
+        # 4) Gold spans (0/1 por candidato)
+        gold_starts, gold_ends = extract_gold_spans(ex)
+        mention_labels = model.get_candidate_labels(span_starts, span_ends, gold_starts, gold_ends)
+
+        # 5) Tensores para o device
+        input_ids = input_ids.to(device)
+        attention_mask = attention_mask.to(device)
+        span_starts = span_starts.to(device)
+        span_ends = span_ends.to(device)
+        span_batch_idx = span_batch_idx.to(device)
+        mention_labels = mention_labels.to(device)
+
+        # 6) Forward + loss
+        out = model.get_prediction_and_loss(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            span_starts=span_starts,
+            span_ends=span_ends,
+            span_batch_idx=span_batch_idx,
+            mention_labels=mention_labels
+        )
+        loss = out["loss"]
+
+        if args.split == "train":
+            optim.zero_grad(set_to_none=True)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optim.step()
+
+        # Log simples
+        with torch.no_grad():
+            probs = torch.sigmoid(out["logits"])
+            preds = (probs >= 0.5).long()
+            acc = (preds == mention_labels).float().mean().item()
+        print(f"doc {used}: T={input_ids.size(1)}, spans={span_starts.numel()}, loss={float(loss):.4f}, acc={acc:.3f}")
 
 if __name__ == "__main__":
     main()
+
