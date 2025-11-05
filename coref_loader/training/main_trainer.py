@@ -12,6 +12,9 @@ import argparse #biblio p rodar o código direto no terminal
 from pathlib import Path
 from coref_loader.data import CorefDataset
 
+from coref_loader.training.model import CorefModel
+
+
 #contando quantos tokens existem no total em todas as sentences do doc:
 def count_tokens(sentences):
     return sum(len(s) for s in sentences)
@@ -27,35 +30,17 @@ def main():
 
     ds = CorefDataset(args.data_dir, args.split) #criao conjunto de dados com os args passados
     print(f"[OK] carregado: {len(ds)} documentos ({args.split})\n") #imprime n de docs que foram carregados
-'''
-from coref_loader.training.model import CorefModel
 
+model = CorefModel(config)
+For batch in ds: 
+Batch["input_ids"] 
+# loss=model(batch) 
 config = {
     "encoder_name": "bert-base-cased",   #escolhendo modelo
     "max_segment_len": 512,
     "max_span_width": 30,
     "dropout": 0.2
 }
-
-model = CorefModel(config)
-'''
-
-'''
-out = model.get_prediction_and_loss(...tensores...)
-'''
-    n = len(ds) if args.limit == 0 else min(args.limit, len(ds)) #pra saber quantos imprimir: 0 = todos / menor limite entre o pedido e o n total
-    for i in range(n): #infos basicas do doc:
-        doc = ds[i]
-        doc_key = doc["doc_key"]
-        nsents = len(doc["sentences"])
-        ntoks = count_tokens(doc["sentences"])
-        nclus = len(doc.get("clusters", []))
-        
-        preview = " ".join(doc["sentences"][0][:args.preview]) if nsents else "" #junta os primeiros args.preview tokens da primeira sentence p mostrar
-        print(f"[{i:05d}] {doc_key} | sentenças: {nsents} | tokens_total: {ntoks} | clusters: {nclus}") #formato para imprimir
-        if preview:
-            print(f"       1ª sentença: {preview}")
-    print("\n[done]")
 
 if __name__ == "__main__":
     main()
