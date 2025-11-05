@@ -63,34 +63,37 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         return eq.any(dim=1).long()                                     #p cada candidato i, verifica se ele bate com algum gold (linha i tem algum True?)
         #resultado final é um rotulo por candidato
 
+    
     #tensorflow -> transformers
     def get_prediction_and_loss(
-        self,
-        input_ids: torch.LongTensor,
-        attention_mask: torch.LongTensor,
-        span_starts: torch.LongTensor,
-        span_ends: torch.LongTensor,
-        span_batch_idx: torch.LongTensor,
-        mention_labels: torch.LongTensor = None  
-    ):
-        #logits = scores brutos (chamo o forward pra obter os logits de cada span)
-        logits = self.forward(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            span_starts=span_starts,
-            span_ends=span_ends,
-            span_batch_idx=span_batch_idx
-        ) 
-    
-        #loss=erro (compara verdadeiro com as predictions feitas)
-        loss = None #começa com loss vazia (se não houver rótulos, nao precisa calcular nada)
-        if mention_labels is not None:
+    self,
+    input_ids: torch.LongTensor,
+    attention_mask: torch.LongTensor,
+    span_starts: torch.LongTensor,
+    span_ends: torch.LongTensor,
+    span_batch_idx: torch.LongTensor,
+    mention_labels: torch.LongTensor = None
+):
+    #padronizando a máscara
+    attention_mask = attention_mask.long()
+
+    logits = self.forward(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        span_starts=span_starts,
+        span_ends=span_ends,
+        span_batch_idx=span_batch_idx
+    )
+
+    #loss=erro (compara verdadeiro com as predictions feitas)
+    loss = None #começa com loss vazia (se não houver rótulos, nao precisa calcular nada)
+    if mention_labels is not None:
+        if mention_labels.numel() == 0:
+            loss = logits.new_tensor(0.0)
+        else:
             loss = torch.nn.functional.binary_cross_entropy_with_logits(
                 logits, mention_labels.float()
             ) #binary_cross_entropy_with_logits para comparar logits (notas brutas que o modelo deu) com mention_labels (rótulos verdadeiros) 
                 #e mede o quanto o modelo errou
-    
-        return {
-            "logits": logits,                 
-            "loss": loss                      
-        }
+
+    return {"logits": logits, "loss": loss}
