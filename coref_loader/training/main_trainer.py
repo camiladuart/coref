@@ -161,7 +161,7 @@ def main():
             preds = (probs >= 0.5).long()             
             acc = (preds == mention_labels).float().mean().item() if mention_labels.numel() > 0 else 0.0
         #imprime linha
-        print(f"doc {used}: T={input_ids.size(1)}, spans={span_starts.numel()}, loss={float(loss):.4f}, acc={acc:.3f}")
+        print(f"doc {used}: T={input_ids.size(1)}, spans={span_starts.numel()}, loss={loss.detach().item():.4f}, acc={acc:.3f}")
         #acumula para médias
         tot_docs += 1
         tot_loss += float(loss)
