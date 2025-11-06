@@ -1,0 +1,55 @@
+CODE NOTES: 
+
+Code tasks - Primeira (setup + gap_to_jsonlines) e segunda (criação data.py + main_trainer.py) semanas :
+
+Dificuldades: 
+- Tentei usar o dataset original do OntoNotes, com o codigo ontonotes_to_jsonlines.py, mas tive problemas com formatos: ele vem em formato .onf e o ontonotes-db-tool oficial é em Python 2, então não consegui importar. Mudei de plano e passei a testar com arquivos .jsonlines criados manualmente.
+- No setup inicial: tive muitos erros de ambiente (versões de python, tensorflow, etc) -> resolvi criando um ambiente limpo (python 3.7) e instalando manualmente o que precisava.
+- Imports e estrutura: o python não encontrava o pacote coref_loader -> resolvi rodando o trainer como módulo (python -m coref_loader.training.main_trainer).
+#roda 100% em Python 3; consigo ler e imprimir instâncias do dataset no formato .jsonlines; o código está sem dependências antigas (tensorflow, pytorch, etc.)
+
+
+
+Terceira semana (criação model.py): 
+
+Notas sobre a construção do modelo:
+independent.py -> model.py
+
+Na função init, removi:
+- self.max_segment_len, self.max_span_width, self.genres, porque nao uso no modelo
+- .subtoken_maps porque o modelo vai receber já os tensores prontos
+- .gold (gold labels - anotaçoes verdadeiras - o modelo recebe como entrada p calcular loss)
+- self.eval_data = None: dados de avaliação -> nao pertencem à classe do modelo
+- self.tokenizer
+
+No bloco do input_props.append (tensorflow), alterei para pytorch então, ao inves disso, vou definir as entradas diretamente nas funçoes:
+- input_ids [B,T], attention_mask [B,T], span_starts [N], span_ends [N], span_batch_idx [N]
+- placeholders e filas (PaddingFIFOQueue) -> removi para o pytorch (dataloader + chamar função)
+- removi o self.get_predictions_and_loss pq o trainer vai chamar
+- tvars, variable names é a inicialização de pesos via checkpoints TF -> removi pq o AutoModel.from_pretrained(config["encoder_name"]), ja carrega os pesos automaticamente (Hugging Face)
+- train/warmup/global steps e train_op
+
+Funções que não utilizei:
+        1. start_enqueue_thread -> usa fila do tensorflow-> em PyTorch vira DataLoader no trainer
+        2. restore -> restaura variáveis do TF a partir de um checkpoint-> aqui os pesos vem de AutoModel.from_pretrained(...)
+        3. tensorize_mentions-> recebe lista de menções [(start, end), ...] e devolve dois arrays starts, ends: aqui o modelo vai já com span_starts/span_ends (tensores).
+        4. tensorize_span_labels -> pega [(start, end, label_name), ...] e transforma em arrays + mapeia label_name ->id.
+            necessária para classes além de 0/1; por enquanto tenho mention/not-mention (0/1) -> get_candidate_labels ja resolve isso por (start,end).
+        5. get_speaker_dict- >cria um dicionário de speakers (não vou usar)
+        6. tensorize_example -> TF + tokenizer dentro do modelo; aqui: tokenização por transformers.AutoTokenizer fora do modelo
+        7. truncate_example-> corta o documento por número de sentenças e ajusta offsets de gold_starts/ends, sentence_map, etc.
+            pode estar no DataLoader: em PyTorch, isso é feito antes de alimentar o modelo (se os exemplos ultrapassarem o limite)
+        8. get_dropout (desatualizada para pytorch) -> nn.Dropout
+        9. coarse_to_fine_pruning: para cada span escolhe um conjunto pequeno de antecedentes candidatos ->nao preciso para detecção de menções.
+
+No fim, meu modelo usa PyTorch e Transformers ao invés de tensorflow, contém o necessário para a realização das tarefas pedidas:
+1. get_candidate_labels
+2. get_span_emb (implícita no forward)
+3. get_mention_scores
+4. get_prediction_and_loss
+
+dificuldades:
+- passar tudo de Tensorflow pra pytorch -> instalações
+- .jsonlines com nome train para o modelo aceitar
+- erros: texto tem 4703 sub-tokens, mas o BERT aceita no máximo 512 -> precisei truncar (BERT opera em wordpieces (WPs) e tem limite 512 WPs)
+- converter spans de tokens para wordpieces;
