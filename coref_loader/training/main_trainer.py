@@ -1,4 +1,7 @@
-#terminal: python -m coref_loader.training.main_trainer --data_dir "C:\Users\PC\coref_data\ontonotes_onf" --split dev --limit 5
+#cd coref_main
+#Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+#.\.venv\Scripts\Activate.ps1
+#python -m coref_loader.training.main_trainer --data_dir "C:\Users\PC\coref_data\ontonotes_onf" --split dev --limit 5
 import argparse
 import torch
 from pathlib import Path
