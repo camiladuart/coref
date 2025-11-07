@@ -64,6 +64,7 @@ def main():
         attention_mask = enc["attention_mask"]
         
         # Mapeamento de wordpiece -> token original
+        # Eu tenho um gato. -> Eu,tenh#,#o,um,gat#,#o -> 1,2,2,3,4,4  
         if hasattr(enc, "word_ids"):
             wp2tok = enc.word_ids(0)
         else:
