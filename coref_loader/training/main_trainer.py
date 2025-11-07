@@ -44,11 +44,10 @@ def main():
     tot_acc  = 0.0
 
     #percorrer os docs do dataset
-    for ex in ds:
-        if args.limit and used >= args.limit:
+    for idx,ex in enumerate(ds):
+        if args.limit and idx >= args.limit:
             break
-        used += 1
-
+        
         #juntar sentenças e construir sentence_map
         tokens, sentence_map = flatten_sentences(ex["sentences"])
 
