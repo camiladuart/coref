@@ -2,7 +2,7 @@ CODE NOTES:
 
 Code tasks - Primeira (setup + gap_to_jsonlines) e segunda (criação data.py + main_trainer.py) semanas :
 
-Dificuldades: 
+Dificuldades encontradas ao longo do trabalho: 
 - Tentei usar o dataset original do OntoNotes, com o codigo ontonotes_to_jsonlines.py, mas tive problemas com formatos: ele vem em formato .onf e o ontonotes-db-tool oficial é em Python 2, então não consegui importar. Mudei de plano e passei a testar com arquivos .jsonlines criados manualmente.
 - No setup inicial: tive muitos erros de ambiente (versões de python, tensorflow, etc) -> resolvi criando um ambiente limpo (python 3.7) e instalando manualmente o que precisava.
 - Imports e estrutura: o python não encontrava o pacote coref_loader -> resolvi rodando o trainer como módulo (python -m coref_loader.training.main_trainer).
@@ -16,7 +16,7 @@ Notas sobre a construção do modelo:
 independent.py -> model.py
 
 Na função init, removi:
-- self.max_segment_len, self.max_span_width, self.genres, porque nao uso no modelo
+- self.max_segment_len e self.genres
 - .subtoken_maps porque o modelo vai receber já os tensores prontos
 - .gold (gold labels - anotaçoes verdadeiras - o modelo recebe como entrada p calcular loss)
 - self.eval_data = None: dados de avaliação -> nao pertencem à classe do modelo
@@ -48,8 +48,9 @@ No fim, meu modelo usa PyTorch e Transformers ao invés de tensorflow, contém o
 3. get_mention_scores
 4. get_prediction_and_loss
 
-dificuldades:
+dificuldades encontradas ao longo do trabalho:
 - passar tudo de Tensorflow pra pytorch -> instalações
 - .jsonlines com nome train para o modelo aceitar
 - erros: texto tem 4703 sub-tokens, mas o BERT aceita no máximo 512 -> precisei truncar (BERT opera em wordpieces (WPs) e tem limite 512 WPs)
+
 - converter spans de tokens para wordpieces;
