@@ -53,4 +53,15 @@ dificuldades encontradas ao longo do trabalho:
 - .jsonlines com nome train para o modelo aceitar
 - erros: texto tem 4703 sub-tokens, mas o BERT aceita no máximo 512 -> precisei truncar (BERT opera em wordpieces (WPs) e tem limite 512 WPs)
 
-- converter spans de tokens para wordpieces;
+
+Quarta semana (alterações no maintrainer):
+-organizei o código do wordpiece que estava confuso
+- substitui truncagem do doc inteiro por segmentação por sentenças (usei max_segment_len) -> não perco o resto do doc, processa em partes
+-peguei spans dos embeddings (no model.py)
+-criei função de scoring para os candidatos (model.py)
+
+saída: 
+[doc 01 | seg 01] T_wp= 74 | spans= 840 | loss=0.7115 | acc=0.423 | top5_scores=[0.648, 0.626, 0.623, 0.621, 0.620]
+...
+
+-ficou faltando: fazer uma projeção linear dos spans + largura dos spans
