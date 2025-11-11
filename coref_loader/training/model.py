@@ -26,17 +26,18 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         span_ends: torch.LongTensor,       
         span_batch_idx: torch.LongTensor  
     ) -> torch.Tensor:                    
-       
-        outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask) 
-        token_emb = outputs.last_hidden_state  
+
+        #pegar spans dos embeddings:
+        outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask) #transformação token -> embedding
+        token_emb = outputs.last_hidden_state  #pegar os embeddings de cada token
         #pegar vetor do token inicial e final 
         start_vecs = token_emb[span_batch_idx, span_starts] 
         end_vecs   = token_emb[span_batch_idx, span_ends]   
-        #representação: concatenação do início e do fim
-        span_emb = torch.cat([start_vecs, end_vecs], dim=-1)  
-        #calcula 1 logit (score) por span:
-        logits = self.mention_scorer(span_emb).squeeze(-1)   
-    
+        #juntar os dois vetores em um só
+        span_emb = torch.cat([start_vecs, end_vecs], dim=-1) 
+         
+        #calcular o score da menção (n alto-> prov menção; baixo-> nao é):
+        logits = self.get_mention_scores(span_emb)
         return logits #score
 
 
@@ -95,5 +96,7 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
                     logits, mention_labels.float()
                 ) #binary_cross_entropy_with_logits para comparar logits (notas brutas que o modelo deu) com mention_labels (rótulos verdadeiros) 
                     #e mede o quanto o modelo errou
-
         return {"logits": logits, "loss": loss}
+    
+    def get_mention_scores(self, span_emb: torch.Tensor) -> torch.Tensor:
+        return self.mention_scorer(span_emb).squeeze(-1)
