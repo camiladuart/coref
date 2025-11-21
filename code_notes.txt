@@ -64,4 +64,11 @@ saída:
 [doc 01 | seg 01] T_wp= 74 | spans= 840 | loss=0.7115 | acc=0.423 | top5_scores=[0.648, 0.626, 0.623, 0.621, 0.620]
 ...
 
--ficou faltando: fazer uma projeção linear dos spans + largura dos spans
+
+
+Quinta semana: 
+-registro no delcalion
+-modificações no codigo do spanbert: 
+1. organização do main_trainer -> chunk 58-127 dentro do corefmodel
+2. loss dentro da forward
+
