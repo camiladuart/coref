@@ -15,9 +15,24 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
 
         # span_emb = [start ; end]. Cada span é representado juntando [vetor_start ; vetor_end]
         span_emb_size = hidden_size * 2 #ex: 768 no BERT base
+        
+        #projeção linear:
+        self.span_projection = nn.Linear(span_emb_size, span_emb_size)
+            #pega o vetor [start ; end] e aplica W*x + b (mantenho dimensão)
+        
         self.mention_scorer = nn.Linear(span_emb_size, 1) #cria uma camada linear que recebe o vetor e devolve 1 numero só -> score 
             #score = quanto o modelo acha que aquele span é uma menção (numero alto = sim, baixo = não)
-      
+
+        # MLP para comparar pares de spans:
+        #para cada par (i,j): [span_i ; span_j ; span_i * span_j]  ->  (3 * span_emb_size)
+        pair_input_size = span_emb_size * 3
+        self.pair_scorer = nn.Sequential(
+            nn.Linear(pair_input_size, span_emb_size),
+            nn.ReLU(),
+            nn.Linear(span_emb_size, 1)  #devolve 1 score p par
+        )
+        self.last_pair_scores = None #guarda o último resultado de pares (visualização)
+
 
     def _forward_wp(
         self,
@@ -36,9 +51,15 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         end_vecs   = token_emb[span_batch_idx, span_ends]   
         #juntar os dois vetores em um só
         span_emb = torch.cat([start_vecs, end_vecs], dim=-1) 
-         
-        #calcular o score da menção (n alto-> prov menção; baixo-> nao é):
-        logits = self.get_mention_scores(span_emb)
+        #proj linear:
+        span_proj = self.span_projection(span_emb) 
+        
+        #calculando scores de relação entre spans:
+        self.last_pair_scores = self.score_span_pairs(span_emb)
+
+        #calculando o score da menção (n alto-> prov menção; baixo-> nao é):
+        logits = self.get_mention_scores(span_proj)
+        
         return logits #score
     
     def forward(
@@ -69,13 +90,14 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         )
         input_ids = enc["input_ids"]
         attention_mask = enc["attention_mask"]
-        T_wp = input_ids.size(1)  # quantos subtokens tem este segmento
-
+        T_wp = input_ids.size(1)  # quantos subtokens tem este segmento: n são tokens pq o bert quebra palavras em pedacinhos
+        
         #wordpiece
         try: #p garantir compatibilidade com versoes do tokenizer
             wp2tok = enc.word_ids(0)
         except Exception:
             wp2tok = enc.encodings[0].word_ids
+            
         #construir primeiro/último WP de cada token 
         n_tokens = len(tokens)
         first_wp = [-1] * n_tokens #listas começam com -1
@@ -206,3 +228,28 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
     '''
     def get_mention_scores(self, span_emb: torch.Tensor) -> torch.Tensor:
         return self.mention_scorer(span_emb).squeeze(-1)
+    
+    #calcular scores de relação entre pares de spans:
+    def score_span_pairs(self, span_emb: torch.Tensor) -> torch.Tensor:
+        N, D = span_emb.size() # N numero de spans; dimensão D
+        device = span_emb.device
+
+        #inicializa com valor bem negativo (p someçar "sem relaçao")
+        pair_scores = span_emb.new_full((N, N), fill_value=-1e9)
+
+        #para cada span i, comparamos com spans antecedentes j < i 
+        for i in range(1, N):
+            curr = span_emb[i].expand(i, D)     
+            prev = span_emb[:i]                 #spans 0..i-1  -> [i, D]
+
+            #representação do par (i,j): [span_i ; span_j ; span_i * span_j]
+            pair_input = torch.cat(
+                [curr, prev, curr * prev],
+                dim=-1
+            )                                   # [i, 3D]
+
+            #passando no MLP de pares para gerar um score por par:
+            scores = self.pair_scorer(pair_input).squeeze(-1)  #squeeze(-1) p transformar de [i, 1] matriz 2D para [i], vetor 1D
+            pair_scores[i, :i] = scores #guardando
+            
+        return pair_scores
