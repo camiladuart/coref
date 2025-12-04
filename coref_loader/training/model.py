@@ -40,7 +40,9 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         attention_mask: torch.LongTensor,  #coloquei tudo como entrada
         span_starts: torch.LongTensor,     
         span_ends: torch.LongTensor,       
-        span_batch_idx: torch.LongTensor  
+        span_batch_idx: torch.LongTensor,
+        candidate_cluster_ids: torch.LongTensor = None,
+        mention_labels: torch.LongTensor = None  
     ) -> torch.Tensor:                    
 
         #pegar spans dos embeddings:
@@ -60,7 +62,18 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         #calculando o score da menção (n alto-> prov menção; baixo-> nao é):
         logits = self.get_mention_scores(span_proj)
         
-        return logits #score
+        #loss:
+        device = token_emb.device
+        #começa com loss = 0.0 (caso não tenha info de cluster)
+        pair_loss = torch.tensor(0.0, device=device)
+        #se há ids de cluster dos candidatos -> cálculo da loss de pares
+        if candidate_cluster_ids is not None and candidate_cluster_ids.numel() > 0:
+            pair_loss = self.coref_pair_loss(
+                self.last_pair_scores,      
+                candidate_cluster_ids.to(device) 
+            ) #loss entre a matriz de scores predita e os rótulos reais
+        loss = pair_loss  #loss de pares
+        return logits, mention_labels, loss
     
     def forward(
         self,
@@ -71,6 +84,7 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         tokenizer,                
         gold_starts_all: torch.LongTensor,
         gold_ends_all: torch.LongTensor,
+        gold_cluster_ids_all,
         max_span_width: int = 30,
     ):  
     # juntar sentenças e construir sentence_map
@@ -116,15 +130,18 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
             return torch.empty(0, device=next(self.parameters()).device), torch.empty(0, dtype=torch.long, device=next(self.parameters()).device), torch.tensor(0.0, device=next(self.parameters()).device)
 
         # filtrar gold spans do segmento
-        offset_glob = sum(len(s) for s in sentences[:seg_start])#inicio do segmento (soma quantos tokens existem antes do segmento)
-        if gold_starts_all.numel() > 0: #segue se ha gold spans
-            keep = (gold_starts_all >= offset_glob) & (gold_ends_all < offset_glob + len(tokens)) #cria uma mascara booleana (keep) pra pegar só as mençoes que caem dentro do inertavalo desse segmento (gold_starts_all e gold_ends_all)
+        offset_glob = sum(len(s) for s in sentences[:seg_start])
+        if gold_starts_all.numel() > 0:
+            keep = (gold_starts_all >= offset_glob) & (gold_ends_all < offset_glob + len(tokens))
             gold_starts = gold_starts_all[keep] - offset_glob
-            gold_ends = gold_ends_all[keep] - offset_glob
+            gold_ends   = gold_ends_all[keep]   - offset_glob
+            gold_cluster_ids = gold_cluster_ids_all[keep]  
         else:
-            gold_starts = gold_ends = torch.empty(0, dtype=torch.long)
+            empty = torch.empty(0, dtype=torch.long)
+            gold_starts = empty
+            gold_ends = empty
+            gold_cluster_ids = empty  
 
-        mention_labels = self.get_candidate_labels(span_starts, span_ends, gold_starts, gold_ends)
 
         # wordpiece: converter spans tokens-> wp usando first_wp/last_wp
         span_start_wp, span_end_wp = [], []
@@ -135,6 +152,20 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
                 span_end_wp.append(le)
         if not span_start_wp:
             return torch.empty(0, device=next(self.parameters()).device), torch.empty(0, dtype=torch.long, device=next(self.parameters()).device), torch.tensor(0.0, device=next(self.parameters()).device)
+
+        #rótulos 0/1: se o candidato coincide com algum gold (menção ou não)
+        mention_labels = self.get_candidate_labels(
+            span_starts, span_ends,
+            gold_starts, gold_ends
+        )
+        #ids de cluster por candidato (0 = não pertence a nenhum cluster)
+        candidate_cluster_ids = self.get_candidate_cluster_ids(
+            span_starts,     
+            span_ends,       
+            gold_starts,    
+            gold_ends,        
+            gold_cluster_ids  
+        )
 
         #para todos os tensores que entram em _forward_wp estarem no mesmo device:
         device = next(self.parameters()).device
@@ -148,23 +179,18 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
 
 
         #chama _forward_wp
-        logits = self._forward_wp(
+        logits, mention_labels, loss = self._forward_wp(
             input_ids=input_ids,
             attention_mask=attention_mask,
             span_starts=span_starts,
             span_ends=span_ends,
             span_batch_idx=span_batch_idx,
+            candidate_cluster_ids=candidate_cluster_ids, 
+            mention_labels=mention_labels,               
         )
 
-        # calculando loss dentro da forward
-        if mention_labels.numel() == 0:
-            loss = logits.new_tensor(0.0)
-        else:
-            loss = torch.nn.functional.binary_cross_entropy_with_logits(
-                logits, mention_labels.float()
-            )
-
         return logits, mention_labels.to(device), loss
+
 
     #get_candidate_labels: alterei para implementação pytorch
     def get_candidate_labels(
@@ -253,3 +279,66 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
             pair_scores[i, :i] = scores #guardando
             
         return pair_scores
+    
+    #para saber se dois spans candidatos pertencem ao mesmo cluster (estão ligados ou não):
+    def get_candidate_cluster_ids( 
+        self,
+        candidate_starts: torch.LongTensor,   
+        candidate_ends: torch.LongTensor,     
+        gold_starts: torch.LongTensor,       
+        gold_ends: torch.LongTensor,         
+        gold_cluster_ids: torch.LongTensor,   
+    ) -> torch.LongTensor:                    
+
+        device = candidate_starts.device
+        N = candidate_starts.size(0)
+
+        if gold_starts.numel() == 0: #detectar casos vazios
+            return torch.zeros(N, dtype=torch.long, device=device)
+
+        #transformando candidatos e gold em matriz com start, end
+        cand = torch.stack([candidate_starts, candidate_ends], dim=1)
+        gold = torch.stack([gold_starts, gold_ends], dim=1)
+
+        #comparando os candidatos com os gold: eq[i,j] = True se cand[i] == gold[j]
+        eq = (cand[:, None, :] == gold[None, :, :]).all(dim=-1)  # [N, M]
+        #transformando para boolean
+        matched = eq.long()
+
+        #multiplicação p pegar o cluster do span que bate com o gold (só 0 ou o id do cluster correto)
+        cluster_ids = matched @ gold_cluster_ids.to(device)
+
+        return cluster_ids
+    
+    #helper para transformar cluster_ids em matriz de rótulos e calcular loss:
+    def coref_pair_loss(
+        self,
+        pair_scores: torch.Tensor,         
+        candidate_cluster_ids: torch.Tensor 
+    ) -> torch.Tensor:
+        
+        device = pair_scores.device
+        N = candidate_cluster_ids.size(0)
+
+        if N == 0:
+            return torch.tensor(0.0, device=device)
+        cid = candidate_cluster_ids
+
+        #true para pares com i>j (antecedentes)
+        tri_mask = torch.tril(torch.ones(N, N, dtype=torch.bool, device=device), diagonal=-1)
+        #marco pares do mesmo cluster
+        same_cluster = (cid[:, None] == cid[None, :]) & (cid[:, None] != 0)
+
+        #1 se são do mesmo cluster e j é antecedente de i:
+        pair_labels = (same_cluster & tri_mask).float()  
+
+        #binary cross entropy para pares do mesmo cluster irem para cima e diferentes para baixo (1 -> numero alto)
+        valid_scores = pair_scores[tri_mask]   #quanto o modelo acha que o par esta ligado
+        valid_labels = pair_labels[tri_mask]   #1 se estao realmente ligados
+        if valid_scores.numel() == 0:
+            return torch.tensor(0.0, device=device)
+
+        loss = torch.nn.functional.binary_cross_entropy_with_logits(
+            valid_scores, valid_labels
+        )
+        return loss

@@ -6,7 +6,7 @@ import argparse
 import torch
 from pathlib import Path
 from transformers import AutoTokenizer
-from coref_loader.data import CorefDataset, flatten_sentences, build_candidates, extract_gold_spans
+from coref_loader.data import CorefDataset, extract_gold_spans_with_clusters
 from coref_loader.training.model import CorefModel    
     
 # dividir o doc em segmentos (substitui a truncagem -> max_segment_len)
@@ -50,7 +50,8 @@ def main():
             break
 
         sentences = ex["sentences"]
-        gold_starts_all, gold_ends_all = extract_gold_spans(ex)
+        gold_starts_all, gold_ends_all, gold_cluster_ids_all = extract_gold_spans_with_clusters(ex)
+
 
         chunk_no = 0  # contador de segmento dentro do doc - p numerar os segmentos dentor do doc
 
@@ -58,7 +59,7 @@ def main():
         for seg_start, seg_sents in sentence_chunks(sentences, config["max_segment_len"]):
             chunk_no += 1
 
-            # chamo a forward
+            #chamo a forward
             logits, mention_labels, loss = model.forward(
                 sentences=sentences,
                 seg_start=seg_start,
@@ -66,6 +67,7 @@ def main():
                 tokenizer=tokenizer,
                 gold_starts_all=gold_starts_all,
                 gold_ends_all=gold_ends_all,
+                gold_cluster_ids_all=gold_cluster_ids_all, 
                 max_span_width=config["max_span_width"],
             )
             if logits.numel() == 0:
