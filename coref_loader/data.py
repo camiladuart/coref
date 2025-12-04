@@ -77,3 +77,27 @@ def extract_gold_spans(example): #pega clusters do ontonotes e retorna (gold_sta
     gold_starts = torch.tensor([s for s, _ in gold], dtype=torch.long)
     gold_ends   = torch.tensor([e for _, e in gold], dtype=torch.long)
     return gold_starts, gold_ends
+
+#para pegar os gold spans com o id do cluster de cada um:
+def extract_gold_spans_with_clusters(example):
+    clusters = example.get("clusters", [])
+    gold_spans = []
+    gold_cluster_ids = []
+
+    for cid, cluster in enumerate(clusters, start=1):
+        for start, end in cluster:   #cada par [start, end]
+            gold_spans.append((start, end))
+            gold_cluster_ids.append(cid)
+    if not gold_spans:
+        #nada anotado:
+        return (
+            torch.empty(0, dtype=torch.long),
+            torch.empty(0, dtype=torch.long),
+            torch.empty(0, dtype=torch.long),
+        )
+    starts, ends = zip(*gold_spans) #dividindo a lista em starts e ends
+    return (
+        torch.tensor(starts, dtype=torch.long),
+        torch.tensor(ends, dtype=torch.long),
+        torch.tensor(gold_cluster_ids, dtype=torch.long),
+    ) #convertendo tudo para tensores
