@@ -67,10 +67,12 @@ saída:
 
 
 Quinta e sexta semanas: 
+tarefas feitas:
 -registro no delcalion
 -modificações no codigo do spanbert: 
-1. organização do main_trainer -> chunk 58-127 dentro do corefmodel
-2. loss dentro da forward
+        1. organização do main_trainer -> chunk 58-127 dentro do corefmodel
+        2. loss dentro da forward
 -utilização do debugger no vscode
 -projeção linear
--cálculo dos spans que se relacionam (unfinished)
+-cálculo dos spans que se relacionam 
+-cálculo da loss
