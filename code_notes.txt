@@ -76,3 +76,6 @@ tarefas feitas:
 -projeção linear
 -cálculo dos spans que se relacionam 
 -cálculo da loss
+
+Sétima semana: 
+-estudo do código independent.py -> linhas 287-344
