@@ -6,7 +6,8 @@ import torch
 from typing import List, Tuple
 
 class CorefDataset: ## lê arqs jsonlines do ontonotes. cada linha: {"doc_key", "sentences", "speakers"(opcional), "clusters"(opcional)}
-    def __init__(self, data_dir: str, split: str): #data_dir: pasta com arq.english.jsonlines; split: "train", "dev" ou "test"
+    def __init__(self, data_dir: str, split: str, config: Dict[str, Any]):
+        self.config = config
         self.data_dir = Path(data_dir)
         self.split = split
         self.samples: List[Dict[str, Any]] = self._load_jsonlines() #chama o load_jsonlines e guarda o resultado em self.samples
@@ -35,11 +36,30 @@ class CorefDataset: ## lê arqs jsonlines do ontonotes. cada linha: {"doc_key", 
         return len(self.samples) #quantos docs há
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        return self.samples[idx] #retorna o primeiro documento
+        ex = self.samples[idx]
 
-# helpers para o pipeline
-import torch
-from typing import List, Tuple
+        if self.config.get("use_genre", False):
+            genres_set = set(self.config.get("genres", []))
+
+            doc_key = ex.get("doc_key", ex.get("document_id", ex.get("id", "")))
+
+            genre = None
+            if isinstance(doc_key, str) and doc_key:
+                # tenta separadores comuns
+                for sep in ["/", "_", "-"]:
+                    if sep in doc_key:
+                        cand = doc_key.split(sep)[0].strip().lower()
+                        genre = cand if cand in genres_set else None
+                        break
+
+                # fallback: primeiros 2 chars (ex: "nw", "bc")
+                if genre is None:
+                    cand = doc_key[:2].strip().lower()
+                    genre = cand if cand in genres_set else None
+
+            ex["genre"] = genre  # string tipo "nw" ou None
+
+        return ex
 
 #juntar todas as sentenças num único vetor de tokens + criar um sentence_map (lista-> a qual sentença pertence cada token):
 def flatten_sentences(sentences: List[List[str]]) -> Tuple[List[str], List[int]]:
