@@ -25,12 +25,16 @@ def main():
     config = {
         "encoder_name": "bert-base-cased",
         "max_span_width": 30,
-        "max_segment_len": 3,  # adicionei
-        "dropout": 0.2,
+        "max_segment_len": 3,  
+        "top_span_ratio": 0.4,          #igual ao independent.py
+        "max_top_antecedents": 50,      # c máximo -> valor p começar
+        "use_genre": True,   #só usa gênero se estiver True
+        "genres": ["bc", "bn", "nw", "pt", "wb", "tc", "mz", "cctv", "weibo", "forum", "news"], 
+        "genre_emb_size": 20,  #=feature_size
     }
 
     # dataset:
-    ds = CorefDataset(args.data_dir, args.split)
+    ds = CorefDataset(args.data_dir, args.split, config)
     print(f"[OK] carregado: {len(ds)} documentos ({args.split})")
 
     # modelo + tokenizer + device:
@@ -50,8 +54,11 @@ def main():
             break
 
         sentences = ex["sentences"]
-        gold_starts_all, gold_ends_all, gold_cluster_ids_all = extract_gold_spans_with_clusters(ex)
+        print("DOC_KEY:", ex.get("doc_key"))
+        print("GENRE_EXTRAIDO:", ex.get("genre"))
 
+        gold_starts_all, gold_ends_all, gold_cluster_ids_all = extract_gold_spans_with_clusters(ex)
+        genre = ex.get("genre", None)
 
         chunk_no = 0  # contador de segmento dentro do doc - p numerar os segmentos dentor do doc
 
@@ -69,6 +76,7 @@ def main():
                 gold_ends_all=gold_ends_all,
                 gold_cluster_ids_all=gold_cluster_ids_all, 
                 max_span_width=config["max_span_width"],
+                genre=genre,
             )
             if logits.numel() == 0:
                 continue

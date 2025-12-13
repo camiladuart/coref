@@ -12,9 +12,21 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         #bert_config -> alterei para Transformers. Encoder BERT:
         self.encoder = AutoModel.from_pretrained(config["encoder_name"]) # carrega modelo pronto (bert-base-cased)
         hidden_size = self.encoder.config.hidden_size  #guarda o tamanho dos vetores - 768
+        
+        # gêneros:
+        self.use_genre = config.get("use_genre", False) #le do config
+        if self.use_genre:
+            self.genres = config["genres"] #pega do config a lista que eu defini
+            self.genre_to_id = {g: i for i, g in enumerate(self.genres)} #cria os ids numericos
+            self.genre_embeddings = nn.Embedding(
+                num_embeddings=len(self.genres), #quantos generos
+                embedding_dim=config["genre_emb_size"], #tamanho do vetor de cada genero
+            )
+        # span_emb = [start ; end] (+ opcionalmente gênero)
+        span_emb_size = hidden_size * 2
+        if self.use_genre:
+            span_emb_size += config["genre_emb_size"]
 
-        # span_emb = [start ; end]. Cada span é representado juntando [vetor_start ; vetor_end]
-        span_emb_size = hidden_size * 2 #ex: 768 no BERT base
         
         #projeção linear:
         self.span_projection = nn.Linear(span_emb_size, span_emb_size)
@@ -42,25 +54,81 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         span_ends: torch.LongTensor,       
         span_batch_idx: torch.LongTensor,
         candidate_cluster_ids: torch.LongTensor = None,
-        mention_labels: torch.LongTensor = None  
+        mention_labels: torch.LongTensor = None,  
+        genre=None, 
     ) -> torch.Tensor:                    
 
         #pegar spans dos embeddings:
         outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask) #transformação token -> embedding
         token_emb = outputs.last_hidden_state  #pegar os embeddings de cada token
+        
+        # gênero
+        genre_emb = None
+        print("1-->", self.use_genre) #devolve true
+        if self.use_genre:
+            print("2-->", genre) #devolve none em todos
+            genre_emb = self.get_genre_embedding(genre, token_emb.device, token_emb.dtype)
+            if genre_emb is None:
+                # se não tiver genre ou não estiver na lista, usa vetor zero 
+                genre_emb = torch.zeros(
+                    self.config["genre_emb_size"],
+                    device=token_emb.device,
+                    dtype=token_emb.dtype,
+                )
+
+        
         #pegar vetor do token inicial e final 
         start_vecs = token_emb[span_batch_idx, span_starts] 
         end_vecs   = token_emb[span_batch_idx, span_ends]   
         #juntar os dois vetores em um só
         span_emb = torch.cat([start_vecs, end_vecs], dim=-1) 
+
+        if self.use_genre:
+            genre_feat = genre_emb.unsqueeze(0).expand(span_emb.size(0), -1) #replica o vetor do genero para todos os spans-todos pertencem ao mesmo doc
+            span_emb = torch.cat([span_emb, genre_feat], dim=-1) #concatena ao embedding do span
+            
         #proj linear:
         span_proj = self.span_projection(span_emb) 
-        
-        #calculando scores de relação entre spans:
-        self.last_pair_scores = self.score_span_pairs(span_emb)
 
-        #calculando o score da menção (n alto-> prov menção; baixo-> nao é):
-        logits = self.get_mention_scores(span_proj)
+        #beam:
+        #scores de menção para todos os spans
+        mention_scores = self.get_mention_scores(span_proj)
+        #calculando k 
+        num_words = input_ids.size(1) #aproximando pelo nº de tokens
+        top_span_ratio = self.config.get("top_span_ratio", 0.4)
+        max_k = 3900
+        #no independent: k = min(3900, floor(num_words * top_span_ratio))
+        k_float = float(num_words) * float(top_span_ratio)
+        k = int(k_float)          
+        k = min(max_k, k)
+        #k não pode ser 0 nem maior que o num de spans
+        N = mention_scores.size(0)
+        if N == 0:
+            return mention_scores.new_empty(0), mention_labels, mention_scores.new_tensor(0.0)
+        k = max(1, min(k, N)) #nunca menor que 1 ou maior que N
+        #calculando c:
+        #no independent: c = min(max_top_antecedents, k)
+        max_top_antecedents = self.config.get("max_top_antecedents", 50)
+        c = min(max_top_antecedents, k)
+        #pegando os k maiores scores
+        top_scores, top_indices = torch.topk(mention_scores, k)
+        
+        #aplicar o beam: filtro -> só com spans do beam
+        #criar subfunção!!
+        span_emb = span_emb[top_indices]
+        span_starts = span_starts[top_indices]
+        span_ends = span_ends[top_indices]
+        span_batch_idx = span_batch_idx[top_indices]
+        if mention_labels is not None: #(se a menção for válida)
+            mention_labels = mention_labels[top_indices]
+        if candidate_cluster_ids is not None:
+            candidate_cluster_ids = candidate_cluster_ids[top_indices]
+            
+        self.last_pair_scores = self.score_span_pairs(span_emb) #calcula os scores de cada par (só para spans do beam)
+
+        #logits finais de menção -> scores dos spans do beam
+        logits = top_scores
+        
         
         #loss:
         device = token_emb.device
@@ -73,6 +141,7 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
                 candidate_cluster_ids.to(device) 
             ) #loss entre a matriz de scores predita e os rótulos reais
         loss = pair_loss  #loss de pares
+
         return logits, mention_labels, loss
     
     def forward(
@@ -86,6 +155,7 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         gold_ends_all: torch.LongTensor,
         gold_cluster_ids_all,
         max_span_width: int = 30,
+        genre=None,
     ):  
     # juntar sentenças e construir sentence_map
         tokens, sentence_map = flatten_sentences(seg_sents)
@@ -176,7 +246,7 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         input_ids      = input_ids.to(device)
         attention_mask = attention_mask.to(device)
         mention_labels = mention_labels.to(device)
-
+        candidate_cluster_ids = candidate_cluster_ids.to(device)
 
         #chama _forward_wp
         logits, mention_labels, loss = self._forward_wp(
@@ -186,7 +256,8 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
             span_ends=span_ends,
             span_batch_idx=span_batch_idx,
             candidate_cluster_ids=candidate_cluster_ids, 
-            mention_labels=mention_labels,               
+            mention_labels=mention_labels, 
+            genre=genre,              
         )
 
         return logits, mention_labels.to(device), loss
@@ -215,43 +286,6 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         return eq.any(dim=1).long()                                     #p cada candidato i, verifica se ele bate com algum gold (linha i tem algum True?)
         #resultado final é um rotulo por candidato
 
-    
-    #tensorflow -> transformers
-    # Versão antiga get_prediction_and_loss para entrada já em tensores WP.
-    #nao chamo porque faço o pré-processamento dentro do forward -> loss está sendo calculada direto no trainer
-    '''
-    def get_prediction_and_loss(
-        self,
-        input_ids: torch.LongTensor,
-        attention_mask: torch.LongTensor,
-        span_starts: torch.LongTensor,
-        span_ends: torch.LongTensor,
-        span_batch_idx: torch.LongTensor,
-        mention_labels: torch.LongTensor = None
-    ):
-        #padronizando a máscara
-        attention_mask = attention_mask.long()
-
-        logits = self.forward(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            span_starts=span_starts,
-            span_ends=span_ends,
-            span_batch_idx=span_batch_idx
-        )
-
-        #loss=erro (compara verdadeiro com as predictions feitas)
-        loss = None #começa com loss vazia (se não houver rótulos, nao precisa calcular nada)
-        if mention_labels is not None:
-            if mention_labels.numel() == 0:
-                loss = logits.new_tensor(0.0)
-            else:
-                loss = torch.nn.functional.binary_cross_entropy_with_logits(
-                    logits, mention_labels.float()
-                ) #binary_cross_entropy_with_logits para comparar logits (notas brutas que o modelo deu) com mention_labels (rótulos verdadeiros) 
-                    #e mede o quanto o modelo errou
-        return {"logits": logits, "loss": loss}
-    '''
     def get_mention_scores(self, span_emb: torch.Tensor) -> torch.Tensor:
         return self.mention_scorer(span_emb).squeeze(-1)
     
@@ -326,15 +360,47 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
 
         #true para pares com i>j (antecedentes)
         tri_mask = torch.tril(torch.ones(N, N, dtype=torch.bool, device=device), diagonal=-1)
-        #marco pares do mesmo cluster
+        
+        #pruning de antecedentes:
+        max_top_antecedents = self.config.get("max_top_antecedents", 50)
+        c = min(max_top_antecedents, N) #numero maximo de antecedentes por span
+
+        if c < N:
+            masked_scores = pair_scores.masked_fill(~tri_mask, -1e9) #coloco num muito negativo onde nao for antecedente valido
+
+            #guarda quais antecedentes manter p/ cada i
+            keep_antecedent = torch.zeros_like(tri_mask)
+
+            # para cada span i, manter só antecedentes com maior score
+            for i in range(1, N):
+                # scores só dos antecedentes válidos:
+                row_scores = masked_scores[i, :i]   
+                if row_scores.numel() == 0:
+                    continue
+
+                # número de antecedentes para manter nesta linha (não pode > i)
+                k_i = min(c, i)
+
+                # índices dos top-k_i antecedentes em j < i
+                top_vals, top_idx = torch.topk(row_scores, k_i)
+
+                # marcar esses antecedentes como "mantidos"
+                keep_antecedent[i, top_idx] = True
+
+            # combina: só pares i>j E escolhidos pelo top-c
+            tri_mask = tri_mask & keep_antecedent
+
+
+        # marco pares do mesmo cluster
         same_cluster = (cid[:, None] == cid[None, :]) & (cid[:, None] != 0)
 
-        #1 se são do mesmo cluster e j é antecedente de i:
+        # 1 se são do mesmo cluster e j é antecedente de i:
         pair_labels = (same_cluster & tri_mask).float()  
 
-        #binary cross entropy para pares do mesmo cluster irem para cima e diferentes para baixo (1 -> numero alto)
-        valid_scores = pair_scores[tri_mask]   #quanto o modelo acha que o par esta ligado
-        valid_labels = pair_labels[tri_mask]   #1 se estao realmente ligados
+        # scores e rótulos só dos pares considerados (pruning de c já aplicado)
+        valid_scores = pair_scores[tri_mask]
+        valid_labels = pair_labels[tri_mask]
+
         if valid_scores.numel() == 0:
             return torch.tensor(0.0, device=device)
 
@@ -342,3 +408,19 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
             valid_scores, valid_labels
         )
         return loss
+    
+    def get_genre_embedding(self, genre, device, dtype):
+        if not self.use_genre or genre is None:
+            return None
+
+        if isinstance(genre, str):
+            genre = genre.strip().lower()
+            genre_id = self.genre_to_id.get(genre, None)
+            if genre_id is None:
+                return None
+        else:
+            genre_id = int(genre)
+
+        genre_id = torch.tensor([genre_id], device=device)
+        emb = self.genre_embeddings(genre_id).squeeze(0)
+        return emb.to(dtype=dtype)                  
