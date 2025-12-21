@@ -1,9 +1,10 @@
 #cd coref_main
 #Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 #.\.venv\Scripts\Activate.ps1
-#python -m coref_loader.training.main_trainer --data_dir "C:\Users\PC\coref_data\ontonotes_onf" --split dev --limit 5
+#python -m coref_loader.training.main_trainer --data_dir "C:\Users\PC\coref_data\ontonotes_onf" --split train --limit 1
 import argparse
 import torch
+import json
 from pathlib import Path
 from transformers import AutoTokenizer
 from coref_loader.data import CorefDataset, extract_gold_spans_with_clusters
@@ -29,13 +30,20 @@ def main():
         "top_span_ratio": 0.4,          #igual ao independent.py
         "max_top_antecedents": 50,      # c máximo -> valor p começar
         "use_genre": True,   #só usa gênero se estiver True
-        "genres": ["bc", "bn", "nw", "pt", "wb", "tc", "mz", "cctv", "weibo", "forum", "news"], 
+        "genres": [],  
         "genre_emb_size": 20,  #=feature_size
     }
 
     # dataset:
     ds = CorefDataset(args.data_dir, args.split, config)
     print(f"[OK] carregado: {len(ds)} documentos ({args.split})")
+    
+    if config.get("use_genre", False):
+        #pegar todos os generos:
+        all_genres = sorted({ex.get("genre") for ex in ds.samples if ex.get("genre")})
+        config["genres"] = all_genres
+        print("[OK] genres auto-detectados:", all_genres[:20], "..." if len(all_genres) > 20 else "")
+
 
     # modelo + tokenizer + device:
     tokenizer = AutoTokenizer.from_pretrained(config["encoder_name"])  # carrega o tokenizer do BERT

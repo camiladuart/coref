@@ -26,6 +26,15 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         span_emb_size = hidden_size * 2
         if self.use_genre:
             span_emb_size += config["genre_emb_size"]
+            
+        self.use_segment_distance = True
+        self.max_training_sentences = config.get("max_training_sentences", 10)
+
+        if self.use_segment_distance:
+            self.segment_distance_embeddings = nn.Embedding(
+                self.max_training_sentences,
+                span_emb_size
+            )
 
         
         #projeção linear:
@@ -38,6 +47,8 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         # MLP para comparar pares de spans:
         #para cada par (i,j): [span_i ; span_j ; span_i * span_j]  ->  (3 * span_emb_size)
         pair_input_size = span_emb_size * 3
+        if self.use_segment_distance:
+            pair_input_size += span_emb_size
         self.pair_scorer = nn.Sequential(
             nn.Linear(pair_input_size, span_emb_size),
             nn.ReLU(),
@@ -53,6 +64,7 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         span_starts: torch.LongTensor,     
         span_ends: torch.LongTensor,       
         span_batch_idx: torch.LongTensor,
+        span_segment_ids: torch.LongTensor, 
         candidate_cluster_ids: torch.LongTensor = None,
         mention_labels: torch.LongTensor = None,  
         genre=None, 
@@ -86,7 +98,7 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         if self.use_genre:
             genre_feat = genre_emb.unsqueeze(0).expand(span_emb.size(0), -1) #replica o vetor do genero para todos os spans-todos pertencem ao mesmo doc
             span_emb = torch.cat([span_emb, genre_feat], dim=-1) #concatena ao embedding do span
-            
+
         #proj linear:
         span_proj = self.span_projection(span_emb) 
 
@@ -114,7 +126,6 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         top_scores, top_indices = torch.topk(mention_scores, k)
         
         #aplicar o beam: filtro -> só com spans do beam
-        #criar subfunção!!
         span_emb = span_emb[top_indices]
         span_starts = span_starts[top_indices]
         span_ends = span_ends[top_indices]
@@ -123,24 +134,46 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
             mention_labels = mention_labels[top_indices]
         if candidate_cluster_ids is not None:
             candidate_cluster_ids = candidate_cluster_ids[top_indices]
-            
-        self.last_pair_scores = self.score_span_pairs(span_emb) #calcula os scores de cada par (só para spans do beam)
+        
+        span_segment_ids = span_segment_ids[top_indices]
+        self.last_pair_scores = self.score_span_pairs(span_emb, span_segment_ids)
 
+        # pega top-c antecedentes por span
+        top_antecedents, top_antecedents_mask, top_antecedent_scores = \
+            self.get_top_antecedents_and_scores(self.last_pair_scores, c)
+        # dummy_scores = zeros([k, 1])
+        dummy_scores = torch.zeros(
+            (top_antecedent_scores.size(0), 1),
+            device=top_antecedent_scores.device,
+            dtype=top_antecedent_scores.dtype,
+        )
+        #equivalente a tf.concat([dummy_scores, top_antecedent_scores], 1)
+        top_antecedent_scores = torch.cat([dummy_scores, top_antecedent_scores], dim=1) 
+
+        
         #logits finais de menção -> scores dos spans do beam
         logits = top_scores
         
         
-        #loss:
         device = token_emb.device
-        #começa com loss = 0.0 (caso não tenha info de cluster)
-        pair_loss = torch.tensor(0.0, device=device)
-        #se há ids de cluster dos candidatos -> cálculo da loss de pares
+        loss = torch.tensor(0.0, device=device)
+
+        # loss de menção (span detection)
+        mention_loss = torch.tensor(0.0, device=device)
+        if mention_labels is not None and mention_labels.numel() > 0:
+            mention_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+                logits,                    # = top_scores
+                mention_labels.float()
+            )
+
+        loss = loss + mention_loss
+
+
         if candidate_cluster_ids is not None and candidate_cluster_ids.numel() > 0:
-            pair_loss = self.coref_pair_loss(
-                self.last_pair_scores,      
-                candidate_cluster_ids.to(device) 
-            ) #loss entre a matriz de scores predita e os rótulos reais
-        loss = pair_loss  #loss de pares
+            loss = self.coref_marginal_loss_with_dummy(
+                self.last_pair_scores,
+                candidate_cluster_ids.to(device),
+            )
 
         return logits, mention_labels, loss
     
@@ -156,6 +189,7 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         gold_cluster_ids_all,
         max_span_width: int = 30,
         genre=None,
+        span_segment_ids=None,
     ):  
     # juntar sentenças e construir sentence_map
         tokens, sentence_map = flatten_sentences(seg_sents)
@@ -196,6 +230,16 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
     
         # gerando candidatos (que não cruzam sentença, largura <= max_span_width)
         span_starts, span_ends = build_candidates(sentence_map, max_span_width)
+        
+        # cada span candidato pertence ao segmento atual
+        span_segment_ids = torch.full(
+            (span_starts.size(0),),
+            seg_start,
+            dtype=torch.long,
+            device=span_starts.device,
+        )
+
+
         if span_starts.numel() == 0:
             return torch.empty(0, device=next(self.parameters()).device), torch.empty(0, dtype=torch.long, device=next(self.parameters()).device), torch.tensor(0.0, device=next(self.parameters()).device)
 
@@ -241,6 +285,7 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         device = next(self.parameters()).device
         span_starts = span_starts.to(device)
         span_ends   = span_ends.to(device)
+        span_segment_ids = span_segment_ids.to(device)
         span_batch_idx = torch.zeros_like(span_starts, device=device)
 
         input_ids      = input_ids.to(device)
@@ -257,7 +302,8 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
             span_batch_idx=span_batch_idx,
             candidate_cluster_ids=candidate_cluster_ids, 
             mention_labels=mention_labels, 
-            genre=genre,              
+            genre=genre,   
+            span_segment_ids=span_segment_ids,
         )
 
         return logits, mention_labels.to(device), loss
@@ -290,7 +336,7 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         return self.mention_scorer(span_emb).squeeze(-1)
     
     #calcular scores de relação entre pares de spans:
-    def score_span_pairs(self, span_emb: torch.Tensor) -> torch.Tensor:
+    def score_span_pairs(self, span_emb: torch.Tensor, span_segment_ids: torch.LongTensor) -> torch.Tensor:
         N, D = span_emb.size() # N numero de spans; dimensão D
         device = span_emb.device
 
@@ -302,11 +348,19 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
             curr = span_emb[i].expand(i, D)     
             prev = span_emb[:i]                 #spans 0..i-1  -> [i, D]
 
-            #representação do par (i,j): [span_i ; span_j ; span_i * span_j]
-            pair_input = torch.cat(
-                [curr, prev, curr * prev],
-                dim=-1
-            )                                   # [i, 3D]
+            pair_feats = [curr, prev, curr * prev]
+            
+            mention_segment = span_segment_ids[i]
+            antecedent_segment = span_segment_ids[:i]
+
+            seg_dist = mention_segment - antecedent_segment
+            seg_dist = torch.clamp(seg_dist, 0, self.max_training_sentences - 1)
+
+            seg_emb = self.segment_distance_embeddings(seg_dist)
+            pair_feats.append(seg_emb)
+
+            pair_input = torch.cat(pair_feats, dim=-1)
+
 
             #passando no MLP de pares para gerar um score por par:
             scores = self.pair_scorer(pair_input).squeeze(-1)  #squeeze(-1) p transformar de [i, 1] matriz 2D para [i], vetor 1D
@@ -423,4 +477,84 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
 
         genre_id = torch.tensor([genre_id], device=device)
         emb = self.genre_embeddings(genre_id).squeeze(0)
-        return emb.to(dtype=dtype)                  
+        return emb.to(dtype=dtype)            
+    
+    def coref_marginal_loss_with_dummy(
+        self,
+        pair_scores: torch.Tensor,          # [k, k] (scores i->j, j<i válidos)
+        candidate_cluster_ids: torch.Tensor # [k]
+    ) -> torch.Tensor:
+        #p cada span i, faz softmax em [dummy + top-c antecedentes].
+        #loss= logsumexp(scores) - logsumexp(scores dos antecedentes corretos).
+        
+        device = pair_scores.device
+        k = candidate_cluster_ids.size(0)
+        if k == 0:
+            return torch.tensor(0.0, device=device)
+
+        # c (máx. antecedentes por span)
+        c = min(self.config.get("max_top_antecedents", 50), k)
+
+        #montar scores_antecedents: [k, c+1] (col 0 = dummy)
+        scores_all = pair_scores.new_full((k, c + 1), fill_value=-1e9)
+        scores_all[:, 0] = 0.0  # dummy_scores = 0 igual ao TF zeros([k,1])
+
+        # gold_mask: [k, c+1] bool (dummy é gold se não houver antecedente gold)
+        gold_mask = torch.zeros((k, c + 1), dtype=torch.bool, device=device)
+
+        for i in range(k):
+            if i == 0:
+                gold_mask[i, 0] = True
+                continue
+
+            row = pair_scores[i, :i] 
+            # pega top-c antecedentes (não pode pegar mais do que i)
+            ci = min(c, i)
+            top_vals, top_idx = torch.topk(row, k=ci)  # top_idx em [0..i-1]
+
+            # preenche scores reais nas colunas 1..ci
+            scores_all[i, 1:1+ci] = top_vals
+
+            # define quais desses antecedentes são "gold" (mesmo cluster e cluster != 0)
+            cid_i = candidate_cluster_ids[i]
+            if cid_i != 0:
+                ant_cids = candidate_cluster_ids[top_idx]  # [ci]
+                correct = (ant_cids == cid_i)  # bool [ci]
+            else:
+                correct = torch.zeros(ci, dtype=torch.bool, device=device)
+
+            if correct.any():
+                gold_mask[i, 1:1+ci] = correct
+            else:
+                # se não tem antecedente correto, o gold é o dummy
+                gold_mask[i, 0] = True
+
+        # marginal log-likelihood:
+        # log_norm = logsumexp(scores_all)
+        log_norm = torch.logsumexp(scores_all, dim=1)  # [k]
+
+        # log_gold = logsumexp(scores nos índices gold)
+        masked = scores_all.masked_fill(~gold_mask, -1e9)
+        log_gold = torch.logsumexp(masked, dim=1)  # [k]
+
+        loss = (log_norm - log_gold).sum()
+        return loss
+
+    def get_top_antecedents_and_scores(self, pair_scores: torch.Tensor, c: int):
+        device = pair_scores.device
+        k = pair_scores.size(0)
+
+        top_antecedents = torch.full((k, c), -1, dtype=torch.long, device=device)
+        top_scores = torch.full((k, c), -1e9, dtype=pair_scores.dtype, device=device)
+        top_mask = torch.zeros((k, c), dtype=torch.bool, device=device)
+
+        for i in range(k):
+            if i == 0:
+                continue
+            ci = min(c, i)
+            vals, idx = torch.topk(pair_scores[i, :i], k=ci)
+            top_antecedents[i, :ci] = idx
+            top_scores[i, :ci] = vals
+            top_mask[i, :ci] = True
+
+        return top_antecedents, top_mask, top_scores
