@@ -39,27 +39,22 @@ class CorefDataset: ## lê arqs jsonlines do ontonotes. cada linha: {"doc_key", 
         ex = self.samples[idx]
 
         if self.config.get("use_genre", False):
-            genres_set = set(self.config.get("genres", []))
-
             doc_key = ex.get("doc_key", ex.get("document_id", ex.get("id", "")))
 
             genre = None
             if isinstance(doc_key, str) and doc_key:
-                # tenta separadores comuns
+                # pega o prefixo antes de / _ -
                 for sep in ["/", "_", "-"]:
                     if sep in doc_key:
-                        cand = doc_key.split(sep)[0].strip().lower()
-                        genre = cand if cand in genres_set else None
+                        genre = doc_key.split(sep)[0].strip().lower()
                         break
-
-                # fallback: primeiros 2 chars (ex: "nw", "bc")
                 if genre is None:
-                    cand = doc_key[:2].strip().lower()
-                    genre = cand if cand in genres_set else None
+                    genre = doc_key.strip().lower()
 
-            ex["genre"] = genre  # string tipo "nw" ou None
+            ex["genre"] = genre
 
         return ex
+
 
 #juntar todas as sentenças num único vetor de tokens + criar um sentence_map (lista-> a qual sentença pertence cada token):
 def flatten_sentences(sentences: List[List[str]]) -> Tuple[List[str], List[int]]:
