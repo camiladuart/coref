@@ -24,13 +24,13 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
             )
         # span_emb = [start ; end] (+ opcionalmente gênero)
         span_emb_size = hidden_size * 2
-        if self.use_genre:
+        if self.use_genre: #concatenar o genero
             span_emb_size += config["genre_emb_size"]
             
         self.use_segment_distance = True
         self.max_training_sentences = config.get("max_training_sentences", 10)
 
-        if self.use_segment_distance:
+        if self.use_segment_distance: #criando tabela de embeddings
             self.segment_distance_embeddings = nn.Embedding(
                 self.max_training_sentences,
                 span_emb_size
@@ -76,9 +76,7 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         
         # gênero
         genre_emb = None
-        print("1-->", self.use_genre) #devolve true
-        if self.use_genre:
-            print("2-->", genre) #devolve none em todos
+        if self.use_genre: 
             genre_emb = self.get_genre_embedding(genre, token_emb.device, token_emb.dtype)
             if genre_emb is None:
                 # se não tiver genre ou não estiver na lista, usa vetor zero 
@@ -141,13 +139,13 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         # pega top-c antecedentes por span
         top_antecedents, top_antecedents_mask, top_antecedent_scores = \
             self.get_top_antecedents_and_scores(self.last_pair_scores, c)
-        # dummy_scores = zeros([k, 1])
+        # dummy_scores = zeros([k, 1])-> inicio novo cluster (menção sem antecedente)
         dummy_scores = torch.zeros(
             (top_antecedent_scores.size(0), 1),
             device=top_antecedent_scores.device,
             dtype=top_antecedent_scores.dtype,
         )
-        #equivalente a tf.concat([dummy_scores, top_antecedent_scores], 1)
+        #equivalente a tf.concat([dummy_scores, top_antecedent_scores], 1) -> junta dummy com antec reais
         top_antecedent_scores = torch.cat([dummy_scores, top_antecedent_scores], dim=1) 
 
         
@@ -161,7 +159,7 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         # loss de menção (span detection)
         mention_loss = torch.tensor(0.0, device=device)
         if mention_labels is not None and mention_labels.numel() > 0:
-            mention_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+            mention_loss = torch.nn.functional.binary_cross_entropy_with_logits( #função do pytorch
                 logits,                    # = top_scores
                 mention_labels.float()
             )
@@ -463,13 +461,13 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         )
         return loss
     
-    def get_genre_embedding(self, genre, device, dtype):
+    def get_genre_embedding(self, genre, device, dtype): #genero para embedding
         if not self.use_genre or genre is None:
             return None
 
         if isinstance(genre, str):
-            genre = genre.strip().lower()
-            genre_id = self.genre_to_id.get(genre, None)
+            genre = genre.strip().lower() #normaliza
+            genre_id = self.genre_to_id.get(genre, None) #converte string -> id
             if genre_id is None:
                 return None
         else:
@@ -479,6 +477,7 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         emb = self.genre_embeddings(genre_id).squeeze(0)
         return emb.to(dtype=dtype)            
     
+    #calculo da loss com dummy antecedent (somada à loss de menção na forward)
     def coref_marginal_loss_with_dummy(
         self,
         pair_scores: torch.Tensor,          # [k, k] (scores i->j, j<i válidos)

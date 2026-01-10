@@ -39,10 +39,12 @@ def main():
     print(f"[OK] carregado: {len(ds)} documentos ({args.split})")
     
     if config.get("use_genre", False):
-        #pegar todos os generos:
-        all_genres = sorted({ex.get("genre") for ex in ds.samples if ex.get("genre")})
+        all_genres = sorted({ex["genre"] for ex in ds.samples if ex.get("genre") is not None})
         config["genres"] = all_genres
         print("[OK] genres auto-detectados:", all_genres[:20], "..." if len(all_genres) > 20 else "")
+        if len(all_genres) == 0:
+            raise ValueError("Auto-detect de gêneros vazio.")
+
 
 
     # modelo + tokenizer + device:
@@ -58,6 +60,9 @@ def main():
 
     # percorrer os docs do dataset
     for idx, ex in enumerate(ds):
+        # teste p conferir doc_key e genero
+        print(ex["doc_key"], ex.get("genre"))
+
         if args.limit and idx >= args.limit:
             break
 
