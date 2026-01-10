@@ -5,6 +5,20 @@ from typing import List, Dict, Any
 import torch
 from typing import List, Tuple
 
+def extract_genre(doc_key: str):
+    if not isinstance(doc_key, str) or not doc_key:
+        return None
+
+    doc_key = doc_key.strip().lower()
+
+    #prioriza os separadores mais comuns
+    for sep in ["/", "_", "."]:
+        if sep in doc_key:
+            return doc_key.split(sep)[0]
+
+    return doc_key
+
+
 class CorefDataset: ## lê arqs jsonlines do ontonotes. cada linha: {"doc_key", "sentences", "speakers"(opcional), "clusters"(opcional)}
     def __init__(self, data_dir: str, split: str, config: Dict[str, Any]):
         self.config = config
@@ -23,6 +37,7 @@ class CorefDataset: ## lê arqs jsonlines do ontonotes. cada linha: {"doc_key", 
                 if not line:
                     continue
                 d = json.loads(line) #converte texto json da linha p um dicionario python d
+                d["genre"] = extract_genre(d.get("doc_key", "")) #chama a função def acima
                 #cada doc precisa ter doc_key e sentences. senao, mensagem de erro:
                 if "doc_key" not in d or "sentences" not in d:
                     raise ValueError(f"JSON inválido (faltam campos): {d}")
@@ -35,25 +50,9 @@ class CorefDataset: ## lê arqs jsonlines do ontonotes. cada linha: {"doc_key", 
     def __len__(self) -> int:
         return len(self.samples) #quantos docs há
 
-    def __getitem__(self, idx: int) -> Dict[str, Any]:
-        ex = self.samples[idx]
+    def __getitem__(self, idx: int) -> Dict[str, Any]: #já pago o genero no load
+        return self.samples[idx]
 
-        if self.config.get("use_genre", False):
-            doc_key = ex.get("doc_key", ex.get("document_id", ex.get("id", "")))
-
-            genre = None
-            if isinstance(doc_key, str) and doc_key:
-                # pega o prefixo antes de / _ -
-                for sep in ["/", "_", "-"]:
-                    if sep in doc_key:
-                        genre = doc_key.split(sep)[0].strip().lower()
-                        break
-                if genre is None:
-                    genre = doc_key.strip().lower()
-
-            ex["genre"] = genre
-
-        return ex
 
 
 #juntar todas as sentenças num único vetor de tokens + criar um sentence_map (lista-> a qual sentença pertence cada token):
