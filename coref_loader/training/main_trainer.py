@@ -19,7 +19,7 @@ def main():
     ap = argparse.ArgumentParser()  # criando o leitor de argumentos. add os args que o programa vai aceitar:
     ap.add_argument("--data_dir", required=True, help="Pasta com *.english.jsonlines")  # datadir
     ap.add_argument("--split", default="dev", choices=["train", "dev", "test"])  # split: train/dev/test
-    ap.add_argument("--limit", type=int, default=10, help="Quantos docs usar (0 = todos)")  # quantos docs quero ver
+    ap.add_argument("--limit", type=int, default=0, help="Quantos docs usar (0 = todos)")  
     args = ap.parse_args()  # lê o que foi digitado no terminal e guarda em args
 
     # config p escolher o modelo
@@ -63,8 +63,9 @@ def main():
         # teste p conferir doc_key e genero
         print(ex["doc_key"], ex.get("genre"))
 
-        if args.limit and idx >= args.limit:
+        if args.limit > 0 and idx >= args.limit:
             break
+
 
         sentences = ex["sentences"]
         print("DOC_KEY:", ex.get("doc_key"))
@@ -94,12 +95,17 @@ def main():
             if logits.numel() == 0:
                 continue
 
-            # passo de treino:
             if args.split == "train":
                 optim.zero_grad(set_to_none=True)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optim.step()
+
+                #p evitar crash
+                if (loss is None) or (not torch.is_tensor(loss)) or (not loss.requires_grad):
+                    print(f"[WARN] loss sem grad (pulando backward). loss={loss}")
+                else:
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    optim.step()
+
 
             # p visualizar 
             with torch.no_grad():

@@ -152,12 +152,13 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         #logits finais de menção -> scores dos spans do beam
         logits = top_scores
         
-        
         device = token_emb.device
-        loss = torch.tensor(0.0, device=device)
+        dtype = mention_scores.dtype
+        # zero "neutro" com dtype consistente
+        loss = torch.zeros((), device=device, dtype=dtype)
 
         # loss de menção (span detection)
-        mention_loss = torch.tensor(0.0, device=device)
+        mention_loss = torch.zeros((), device=device, dtype=dtype)
         if mention_labels is not None and mention_labels.numel() > 0:
             mention_loss = torch.nn.functional.binary_cross_entropy_with_logits( #função do pytorch
                 logits,                    # = top_scores
@@ -335,36 +336,43 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
     
     #calcular scores de relação entre pares de spans:
     def score_span_pairs(self, span_emb: torch.Tensor, span_segment_ids: torch.LongTensor) -> torch.Tensor:
-        N, D = span_emb.size() # N numero de spans; dimensão D
+        N, D = span_emb.size()
         device = span_emb.device
+        dtype = span_emb.dtype
 
-        #inicializa com valor bem negativo (p someçar "sem relaçao")
-        pair_scores = span_emb.new_full((N, N), fill_value=-1e9)
+        neg_inf = torch.tensor(-1e9, device=device, dtype=dtype)
 
-        #para cada span i, comparamos com spans antecedentes j < i 
+        rows = []
+
+        # i = 0 não tem antecedentes (tudo -1e9)
+        rows.append(neg_inf.expand(N))
+
         for i in range(1, N):
-            curr = span_emb[i].expand(i, D)     
-            prev = span_emb[:i]                 #spans 0..i-1  -> [i, D]
+            curr = span_emb[i].expand(i, D)   
+            prev = span_emb[:i]             
 
             pair_feats = [curr, prev, curr * prev]
-            
+
             mention_segment = span_segment_ids[i]
             antecedent_segment = span_segment_ids[:i]
 
             seg_dist = mention_segment - antecedent_segment
             seg_dist = torch.clamp(seg_dist, 0, self.max_training_sentences - 1)
 
-            seg_emb = self.segment_distance_embeddings(seg_dist)
+            seg_emb = self.segment_distance_embeddings(seg_dist)  
             pair_feats.append(seg_emb)
 
-            pair_input = torch.cat(pair_feats, dim=-1)
+            pair_input = torch.cat(pair_feats, dim=-1)            
+            scores = self.pair_scorer(pair_input).squeeze(-1)     
 
+            # completa a linha com -1e9 para j >= i
+            pad = neg_inf.expand(N - i)
+            row = torch.cat([scores, pad], dim=0)                 
+            rows.append(row)
 
-            #passando no MLP de pares para gerar um score por par:
-            scores = self.pair_scorer(pair_input).squeeze(-1)  #squeeze(-1) p transformar de [i, 1] matriz 2D para [i], vetor 1D
-            pair_scores[i, :i] = scores #guardando
-            
+        pair_scores = torch.stack(rows, dim=0)                   
         return pair_scores
+
     
     #para saber se dois spans candidatos pertencem ao mesmo cluster (estão ligados ou não):
     def get_candidate_cluster_ids( 
@@ -480,65 +488,58 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
     #calculo da loss com dummy antecedent (somada à loss de menção na forward)
     def coref_marginal_loss_with_dummy(
         self,
-        pair_scores: torch.Tensor,          # [k, k] (scores i->j, j<i válidos)
-        candidate_cluster_ids: torch.Tensor # [k]
+        pair_scores: torch.Tensor,          
+        candidate_cluster_ids: torch.Tensor 
     ) -> torch.Tensor:
-        #p cada span i, faz softmax em [dummy + top-c antecedentes].
-        #loss= logsumexp(scores) - logsumexp(scores dos antecedentes corretos).
-        
         device = pair_scores.device
+        dtype = pair_scores.dtype
         k = candidate_cluster_ids.size(0)
-        if k == 0:
-            return torch.tensor(0.0, device=device)
 
-        # c (máx. antecedentes por span)
+        if k == 0:
+            return torch.tensor(0.0, device=device, dtype=dtype)
+
         c = min(self.config.get("max_top_antecedents", 50), k)
 
-        #montar scores_antecedents: [k, c+1] (col 0 = dummy)
-        scores_all = pair_scores.new_full((k, c + 1), fill_value=-1e9)
-        scores_all[:, 0] = 0.0  # dummy_scores = 0 igual ao TF zeros([k,1])
-
-        # gold_mask: [k, c+1] bool (dummy é gold se não houver antecedente gold)
-        gold_mask = torch.zeros((k, c + 1), dtype=torch.bool, device=device)
+        total = torch.tensor(0.0, device=device, dtype=dtype)
 
         for i in range(k):
+            # dummy score sempre 0.0
+            dummy = torch.zeros(1, device=device, dtype=dtype)
+
             if i == 0:
-                gold_mask[i, 0] = True
+                # só dummy
+                log_norm = torch.logsumexp(dummy, dim=0)
+                log_gold = log_norm
+                total = total + (log_norm - log_gold)
                 continue
 
-            row = pair_scores[i, :i] 
-            # pega top-c antecedentes (não pode pegar mais do que i)
+            row = pair_scores[i, :i]              
             ci = min(c, i)
-            top_vals, top_idx = torch.topk(row, k=ci)  # top_idx em [0..i-1]
 
-            # preenche scores reais nas colunas 1..ci
-            scores_all[i, 1:1+ci] = top_vals
+            top_vals, top_idx = torch.topk(row, k=ci)  
 
-            # define quais desses antecedentes são "gold" (mesmo cluster e cluster != 0)
+            # distribuição: [dummy + top_vals]
+            scores = torch.cat([dummy, top_vals], dim=0)  
+            log_norm = torch.logsumexp(scores, dim=0)
+
             cid_i = candidate_cluster_ids[i]
             if cid_i != 0:
-                ant_cids = candidate_cluster_ids[top_idx]  # [ci]
-                correct = (ant_cids == cid_i)  # bool [ci]
+                ant_cids = candidate_cluster_ids[top_idx]   
+                correct = (ant_cids == cid_i)               
+                if correct.any():
+                    gold_scores = top_vals[correct]         
+                    log_gold = torch.logsumexp(gold_scores, dim=0)
+                else:
+                    # gold = dummy
+                    log_gold = dummy.squeeze(0)
             else:
-                correct = torch.zeros(ci, dtype=torch.bool, device=device)
+                log_gold = dummy.squeeze(0)
 
-            if correct.any():
-                gold_mask[i, 1:1+ci] = correct
-            else:
-                # se não tem antecedente correto, o gold é o dummy
-                gold_mask[i, 0] = True
+            total = total + (log_norm - log_gold)
 
-        # marginal log-likelihood:
-        # log_norm = logsumexp(scores_all)
-        log_norm = torch.logsumexp(scores_all, dim=1)  # [k]
+        return total
 
-        # log_gold = logsumexp(scores nos índices gold)
-        masked = scores_all.masked_fill(~gold_mask, -1e9)
-        log_gold = torch.logsumexp(masked, dim=1)  # [k]
-
-        loss = (log_norm - log_gold).sum()
-        return loss
-
+    
     def get_top_antecedents_and_scores(self, pair_scores: torch.Tensor, c: int):
         device = pair_scores.device
         k = pair_scores.size(0)
