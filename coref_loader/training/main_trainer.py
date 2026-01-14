@@ -171,18 +171,38 @@ def main():
     save_dir.mkdir(exist_ok=True)
 
     # Load datasets
-    print(f"[Loading {args.split} dataset...]")
-    train_ds = CorefDataset(args.data_dir, "train", config)
-    dev_ds = CorefDataset(args.data_dir, "dev", config)
-    print(f"[OK] Train: {len(train_ds)} docs | Dev: {len(dev_ds)} docs")
+    print(f"[Loading datasets from: {args.data_dir}]")
+
+    train_ds = None
+    dev_ds = None
+    test_ds = None
+
+    if args.split == "train":
+        train_ds = CorefDataset(args.data_dir, "train", config)
+        dev_ds = CorefDataset(args.data_dir, "dev", config)
+        print(f"[OK] Train: {len(train_ds)} docs | Dev: {len(dev_ds)} docs")
+
+    elif args.split == "dev":
+        dev_ds = CorefDataset(args.data_dir, "dev", config)
+        print(f"[OK] Dev: {len(dev_ds)} docs")
+
+    elif args.split == "test":
+        test_ds = CorefDataset(args.data_dir, "test", config)
+        print(f"[OK] Test: {len(test_ds)} docs")
+
     
     # Auto-detect genres
     if config.get("use_genre", False):
-        all_genres = sorted({ex["genre"] for ex in train_ds.samples if ex.get("genre") is not None})
+        #detectar a partir do train
+        source_ds = train_ds if train_ds is not None else (dev_ds if dev_ds is not None else test_ds)
+
+        all_genres = sorted({ex.get("genre") for ex in source_ds.samples if ex.get("genre") is not None})
         config["genres"] = all_genres
         print(f"[OK] Genres detectados: {len(all_genres)} -> {all_genres[:10]}...")
+
         if len(all_genres) == 0:
-            raise ValueError("Auto-detect de gêneros vazio.")
+            raise ValueError("Auto-detect de gêneros vazio (nenhum 'genre' encontrado no split).")
+
 
     # Model, tokenizer, device
     tokenizer = AutoTokenizer.from_pretrained(config["encoder_name"])
@@ -190,24 +210,40 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[Device: {device}]")
     model.to(device)
+    
+    # Resume from checkpoint 
+    start_epoch = 0
+    best_dev_loss = float('inf')
+
+    # Auto-use best_model.pt for dev/test if resume_from not provided
+    if args.split in ["dev", "test"] and args.resume_from is None:
+        candidate = Path(args.save_dir) / "best_model.pt"
+        if candidate.exists():
+            args.resume_from = str(candidate)
+
+    if args.resume_from:
+        checkpoint = torch.load(args.resume_from, map_location=device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        print(f"[Loaded checkpoint: {args.resume_from}]")
+
+    
+    # Evaluation-only:
+    if args.split in ["dev", "test"]:
+        eval_ds = dev_ds if args.split == "dev" else test_ds
+        print(f"\n[Evaluation only: {args.split}]")
+
+        eval_loss, eval_acc = evaluate(
+            model, eval_ds, tokenizer, config, device,
+            limit=args.limit if args.limit > 0 else None
+        )
+        print(f"[{args.split.upper()}] Loss: {eval_loss:.4f} | Acc: {eval_acc:.3f}")
+        return
 
     # Optimizer and scheduler
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=2, verbose=True
     )
-
-    # Resume from checkpoint if specified
-    start_epoch = 0
-    best_dev_loss = float('inf')
-    
-    if args.resume_from:
-        checkpoint = torch.load(args.resume_from, map_location=device)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        start_epoch = checkpoint['epoch'] + 1
-        best_dev_loss = checkpoint.get('best_dev_loss', float('inf'))
-        print(f"[Resumed from epoch {start_epoch}, best_dev_loss={best_dev_loss:.4f}]")
 
     # Training loop
     print("\n[Starting training...]")
