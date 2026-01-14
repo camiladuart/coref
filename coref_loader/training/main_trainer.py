@@ -1,86 +1,97 @@
-#cd coref_main
-#Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-#.\.venv\Scripts\Activate.ps1
-#python -m coref_loader.training.main_trainer --data_dir "C:\Users\PC\coref_data\ontonotes_onf" --split train --limit 1
 import argparse
 import torch
 import json
 from pathlib import Path
 from transformers import AutoTokenizer
+from torch.utils.data import DataLoader
 from coref_loader.data import CorefDataset, extract_gold_spans_with_clusters
-from coref_loader.training.model import CorefModel    
-    
-# dividir o doc em segmentos (substitui a truncagem -> max_segment_len)
+from coref_loader.training.model import CorefModel
+from tqdm import tqdm
+import numpy as np
+
 def sentence_chunks(sentences, max_segment_len):
     for i in range(0, len(sentences), max_segment_len):
         yield i, sentences[i : i + max_segment_len]
 
-def main():
-    ap = argparse.ArgumentParser()  # criando o leitor de argumentos. add os args que o programa vai aceitar:
-    ap.add_argument("--data_dir", required=True, help="Pasta com *.english.jsonlines")  # datadir
-    ap.add_argument("--split", default="dev", choices=["train", "dev", "test"])  # split: train/dev/test
-    ap.add_argument("--limit", type=int, default=0, help="Quantos docs usar (0 = todos)")  
-    args = ap.parse_args()  # lê o que foi digitado no terminal e guarda em args
-
-    # config p escolher o modelo
-    config = {
-        "encoder_name": "bert-base-cased",
-        "max_span_width": 30,
-        "max_segment_len": 3,  
-        "top_span_ratio": 0.4,          #igual ao independent.py
-        "max_top_antecedents": 50,      # c máximo -> valor p começar
-        "use_genre": True,   #só usa gênero se estiver True
-        "genres": [],  
-        "genre_emb_size": 20,  #=feature_size
-    }
-
-    # dataset:
-    ds = CorefDataset(args.data_dir, args.split, config)
-    print(f"[OK] carregado: {len(ds)} documentos ({args.split})")
+def evaluate(model, dataset, tokenizer, config, device, limit=None):
+    model.eval()
+    total_loss = 0.0
+    total_acc = 0.0
+    total_spans = 0
+    doc_count = 0
     
-    if config.get("use_genre", False):
-        all_genres = sorted({ex["genre"] for ex in ds.samples if ex.get("genre") is not None})
-        config["genres"] = all_genres
-        print("[OK] genres auto-detectados:", all_genres[:20], "..." if len(all_genres) > 20 else "")
-        if len(all_genres) == 0:
-            raise ValueError("Auto-detect de gêneros vazio.")
+    with torch.no_grad():
+        for idx, ex in enumerate(dataset):
+            if limit and idx >= limit:
+                break
+                
+            sentences = ex["sentences"]
+            gold_starts_all, gold_ends_all, gold_cluster_ids_all = extract_gold_spans_with_clusters(ex)
+            genre = ex.get("genre", None)
+            
+            doc_loss = 0.0
+            doc_spans = 0
+            doc_correct = 0
+            
+            for seg_start, seg_sents in sentence_chunks(sentences, config["max_segment_len"]):
+                logits, mention_labels, loss = model.forward(
+                    sentences=sentences,
+                    seg_start=seg_start,
+                    seg_sents=seg_sents,
+                    tokenizer=tokenizer,
+                    gold_starts_all=gold_starts_all,
+                    gold_ends_all=gold_ends_all,
+                    gold_cluster_ids_all=gold_cluster_ids_all,
+                    max_span_width=config["max_span_width"],
+                    genre=genre,
+                )
+                
+                if logits.numel() == 0:
+                    continue
+                    
+                if loss is not None and torch.is_tensor(loss):
+                    doc_loss += loss.item()
+                    
+                probs = torch.sigmoid(logits)
+                preds = (probs >= 0.5).long()
+                doc_correct += (preds == mention_labels).sum().item()
+                doc_spans += mention_labels.numel()
+            
+            if doc_spans > 0:
+                total_loss += doc_loss
+                total_acc += doc_correct
+                total_spans += doc_spans
+                doc_count += 1
+    
+    avg_loss = total_loss / max(doc_count, 1)
+    avg_acc = total_acc / max(total_spans, 1)
+    
+    return avg_loss, avg_acc
 
-
-
-    # modelo + tokenizer + device:
-    tokenizer = AutoTokenizer.from_pretrained(config["encoder_name"])  # carrega o tokenizer do BERT
-    model = CorefModel(config)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-
-    # se for train: otimizador
-    if args.split == "train":
-        optim = torch.optim.AdamW(model.parameters(), lr=2e-5)
-    model.train() if args.split == "train" else model.eval()  # modelo em modo treino
-
-    # percorrer os docs do dataset
-    for idx, ex in enumerate(ds):
-        # teste p conferir doc_key e genero
-        print(ex["doc_key"], ex.get("genre"))
-
-        if args.limit > 0 and idx >= args.limit:
+#train for one epoch
+def train_epoch(model, dataset, tokenizer, config, optimizer, device, epoch, limit=None):
+    model.train()
+    total_loss = 0.0
+    total_acc = 0.0
+    total_spans = 0
+    doc_count = 0
+    
+    pbar = tqdm(enumerate(dataset), total=len(dataset) if not limit else limit, 
+                desc=f"Epoch {epoch}")
+    
+    for idx, ex in pbar:
+        if limit and idx >= limit:
             break
-
-
+            
         sentences = ex["sentences"]
-        print("DOC_KEY:", ex.get("doc_key"))
-        print("GENRE_EXTRAIDO:", ex.get("genre"))
-
         gold_starts_all, gold_ends_all, gold_cluster_ids_all = extract_gold_spans_with_clusters(ex)
         genre = ex.get("genre", None)
-
-        chunk_no = 0  # contador de segmento dentro do doc - p numerar os segmentos dentor do doc
-
-        # percorre o doc em segmentos de ate max_segment_len
+        
+        doc_loss = 0.0
+        doc_spans = 0
+        doc_correct = 0
+        
         for seg_start, seg_sents in sentence_chunks(sentences, config["max_segment_len"]):
-            chunk_no += 1
-
-            #chamo a forward
             logits, mention_labels, loss = model.forward(
                 sentences=sentences,
                 seg_start=seg_start,
@@ -88,45 +99,172 @@ def main():
                 tokenizer=tokenizer,
                 gold_starts_all=gold_starts_all,
                 gold_ends_all=gold_ends_all,
-                gold_cluster_ids_all=gold_cluster_ids_all, 
+                gold_cluster_ids_all=gold_cluster_ids_all,
                 max_span_width=config["max_span_width"],
                 genre=genre,
             )
+            
             if logits.numel() == 0:
                 continue
-
-            if args.split == "train":
-                optim.zero_grad(set_to_none=True)
-
-                #p evitar crash
-                if (loss is None) or (not torch.is_tensor(loss)) or (not loss.requires_grad):
-                    print(f"[WARN] loss sem grad (pulando backward). loss={loss}")
-                else:
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    optim.step()
-
-
-            # p visualizar 
-            with torch.no_grad():
-                probs = torch.sigmoid(logits)
-                k_total = probs.numel()
-
-                if k_total > 0:
+                
+            optimizer.zero_grad(set_to_none=True)
+            
+            if loss is not None and torch.is_tensor(loss) and loss.requires_grad:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                
+                doc_loss += loss.item()
+                
+                with torch.no_grad():
+                    probs = torch.sigmoid(logits)
                     preds = (probs >= 0.5).long()
-                    acc = (preds == mention_labels).float().mean().item()
-                    k = min(5, k_total)
-                    topk_vals, _ = probs.topk(k)
-                    top_str = ", ".join(f"{topk_vals[r].item():.3f}" for r in range(k))
-                else:
-                    acc = 0.0
-                    top_str = "—"
+                    doc_correct += (preds == mention_labels).sum().item()
+                    doc_spans += mention_labels.numel()
+        
+        if doc_spans > 0:
+            total_loss += doc_loss
+            total_acc += doc_correct
+            total_spans += doc_spans
+            doc_count += 1
+            
+            # Update progress bar
+            pbar.set_postfix({
+                'loss': f'{total_loss/doc_count:.4f}',
+                'acc': f'{total_acc/total_spans:.3f}'
+            })
+    
+    avg_loss = total_loss / max(doc_count, 1)
+    avg_acc = total_acc / max(total_spans, 1)
+    
+    return avg_loss, avg_acc
 
-            print(
-                f"[doc {idx+1:02d} | seg {chunk_no:02d}] "
-                f"loss={loss.detach().item():.4f} | acc={acc:.3f} | "
-                f"spans={mention_labels.numel():4d} | "
-                f"top5_scores=[{top_str}]"
-            )           
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data_dir", required=True, help="Pasta com *.english.jsonlines")
+    ap.add_argument("--split", default="train", choices=["train", "dev", "test"])
+    ap.add_argument("--limit", type=int, default=0, help="Quantos docs usar (0 = todos)")
+    
+    # Training arguments
+    ap.add_argument("--epochs", type=int, default=20, help="Número de épocas")
+    ap.add_argument("--lr", type=float, default=2e-5, help="Learning rate")
+    ap.add_argument("--eval_every", type=int, default=1, help="Avaliar a cada N épocas")
+    ap.add_argument("--save_dir", type=str, default="checkpoints", help="Diretório para salvar modelos")
+    ap.add_argument("--resume_from", type=str, default=None, help="Checkpoint para continuar treinamento")
+    
+    args = ap.parse_args()
+
+    # Config
+    config = {
+        "encoder_name": "bert-base-cased",
+        "max_span_width": 30,
+        "max_segment_len": 3,
+        "top_span_ratio": 0.4,
+        "max_top_antecedents": 50,
+        "use_genre": True,
+        "genres": [],
+        "genre_emb_size": 20,
+    }
+
+    # Create save directory
+    save_dir = Path(args.save_dir)
+    save_dir.mkdir(exist_ok=True)
+
+    # Load datasets
+    print(f"[Loading {args.split} dataset...]")
+    train_ds = CorefDataset(args.data_dir, "train", config)
+    dev_ds = CorefDataset(args.data_dir, "dev", config)
+    print(f"[OK] Train: {len(train_ds)} docs | Dev: {len(dev_ds)} docs")
+    
+    # Auto-detect genres
+    if config.get("use_genre", False):
+        all_genres = sorted({ex["genre"] for ex in train_ds.samples if ex.get("genre") is not None})
+        config["genres"] = all_genres
+        print(f"[OK] Genres detectados: {len(all_genres)} -> {all_genres[:10]}...")
+        if len(all_genres) == 0:
+            raise ValueError("Auto-detect de gêneros vazio.")
+
+    # Model, tokenizer, device
+    tokenizer = AutoTokenizer.from_pretrained(config["encoder_name"])
+    model = CorefModel(config)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[Device: {device}]")
+    model.to(device)
+
+    # Optimizer and scheduler
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=2, verbose=True
+    )
+
+    # Resume from checkpoint if specified
+    start_epoch = 0
+    best_dev_loss = float('inf')
+    
+    if args.resume_from:
+        checkpoint = torch.load(args.resume_from, map_location=device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_epoch = checkpoint['epoch'] + 1
+        best_dev_loss = checkpoint.get('best_dev_loss', float('inf'))
+        print(f"[Resumed from epoch {start_epoch}, best_dev_loss={best_dev_loss:.4f}]")
+
+    # Training loop
+    print("\n[Starting training...]")
+    for epoch in range(start_epoch, args.epochs):
+        print(f"\n{'='*60}")
+        print(f"EPOCH {epoch+1}/{args.epochs}")
+        print(f"{'='*60}")
+        
+        # Train
+        train_loss, train_acc = train_epoch(
+            model, train_ds, tokenizer, config, optimizer, device, 
+            epoch+1, limit=args.limit if args.limit > 0 else None
+        )
+        print(f"\n[Train] Loss: {train_loss:.4f} | Acc: {train_acc:.3f}")
+        
+        # Evaluate
+        if (epoch + 1) % args.eval_every == 0:
+            print("\n[Evaluating on dev set...]")
+            dev_loss, dev_acc = evaluate(
+                model, dev_ds, tokenizer, config, device,
+                limit=args.limit if args.limit > 0 else None
+            )
+            print(f"[Dev] Loss: {dev_loss:.4f} | Acc: {dev_acc:.3f}")
+            
+            # Learning rate scheduling
+            scheduler.step(dev_loss)
+            
+            # Save best model
+            if dev_loss < best_dev_loss:
+                best_dev_loss = dev_loss
+                checkpoint_path = save_dir / "best_model.pt"
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'train_loss': train_loss,
+                    'dev_loss': dev_loss,
+                    'best_dev_loss': best_dev_loss,
+                    'config': config,
+                }, checkpoint_path)
+                print(f"[✓] Saved best model to {checkpoint_path}")
+        
+        # Save checkpoint every epoch
+        checkpoint_path = save_dir / f"checkpoint_epoch_{epoch+1}.pt"
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'train_loss': train_loss,
+            'dev_loss': dev_loss if (epoch + 1) % args.eval_every == 0 else None,
+            'best_dev_loss': best_dev_loss,
+            'config': config,
+        }, checkpoint_path)
+        print(f"[✓] Saved checkpoint to {checkpoint_path}")
+
+    print("\n[Training completed!]")
+    print(f"Best dev loss: {best_dev_loss:.4f}")
+
 if __name__ == "__main__":
     main()
