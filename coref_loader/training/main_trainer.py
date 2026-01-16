@@ -75,22 +75,27 @@ def train_epoch(model, dataset, tokenizer, config, optimizer, device, epoch, lim
     total_acc = 0.0
     total_spans = 0
     doc_count = 0
-    
-    pbar = tqdm(enumerate(dataset), total=len(dataset) if not limit else limit, 
+
+    pbar = tqdm(enumerate(dataset),
+                total=(len(dataset) if not limit else limit),
                 desc=f"Epoch {epoch}")
-    
+
     for idx, ex in pbar:
         if limit and idx >= limit:
             break
-            
+
         sentences = ex["sentences"]
         gold_starts_all, gold_ends_all, gold_cluster_ids_all = extract_gold_spans_with_clusters(ex)
         genre = ex.get("genre", None)
-        
-        doc_loss = 0.0
+
         doc_spans = 0
         doc_correct = 0
-        
+
+        optimizer.zero_grad(set_to_none=True)
+
+        #loss acumulada do documento (tensor)
+        doc_total_loss = torch.tensor(0.0, device=device)
+
         for seg_start, seg_sents in sentence_chunks(sentences, config["max_segment_len"]):
             logits, mention_labels, loss = model.forward(
                 sentences=sentences,
@@ -103,40 +108,39 @@ def train_epoch(model, dataset, tokenizer, config, optimizer, device, epoch, lim
                 max_span_width=config["max_span_width"],
                 genre=genre,
             )
-            
+
             if logits.numel() == 0:
                 continue
-                
-            optimizer.zero_grad(set_to_none=True)
-            
+
+            #acumula loss 
             if loss is not None and torch.is_tensor(loss) and loss.requires_grad:
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optimizer.step()
-                
-                doc_loss += loss.item()
-                
-                with torch.no_grad():
-                    probs = torch.sigmoid(logits)
-                    preds = (probs >= 0.5).long()
-                    doc_correct += (preds == mention_labels).sum().item()
-                    doc_spans += mention_labels.numel()
-        
+                doc_total_loss = doc_total_loss + loss
+
+            #métricas 
+            with torch.no_grad():
+                probs = torch.sigmoid(logits)
+                preds = (probs >= 0.5).long()
+                doc_correct += (preds == mention_labels).sum().item()
+                doc_spans += mention_labels.numel()
+
+        #update uma vez no final do documento
         if doc_spans > 0:
-            total_loss += doc_loss
+            doc_total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+
+            total_loss += float(doc_total_loss.item())
             total_acc += doc_correct
             total_spans += doc_spans
             doc_count += 1
-            
-            # Update progress bar
+
             pbar.set_postfix({
-                'loss': f'{total_loss/doc_count:.4f}',
-                'acc': f'{total_acc/total_spans:.3f}'
+                "loss": f"{total_loss / doc_count:.4f}",
+                "acc": f"{total_acc / total_spans:.3f}",
             })
-    
+
     avg_loss = total_loss / max(doc_count, 1)
     avg_acc = total_acc / max(total_spans, 1)
-    
     return avg_loss, avg_acc
 
 def main():
@@ -179,8 +183,9 @@ def main():
 
     if args.split == "train":
         train_ds = CorefDataset(args.data_dir, "train", config)
-        dev_ds = CorefDataset(args.data_dir, "dev", config)
-        print(f"[OK] Train: {len(train_ds)} docs | Dev: {len(dev_ds)} docs")
+        dev_ds   = CorefDataset(args.data_dir, "dev", config)
+        print(f"[OK] Train: {len(train_ds)} docs")
+        print(f"[OK] Dev: {len(dev_ds)} docs")
 
     elif args.split == "dev":
         dev_ds = CorefDataset(args.data_dir, "dev", config)
@@ -189,6 +194,7 @@ def main():
     elif args.split == "test":
         test_ds = CorefDataset(args.data_dir, "test", config)
         print(f"[OK] Test: {len(test_ds)} docs")
+
 
     
     # Auto-detect genres
@@ -213,37 +219,80 @@ def main():
     
     # Resume from checkpoint 
     start_epoch = 0
-    best_dev_loss = float('inf')
-
-    # Auto-use best_model.pt for dev/test if resume_from not provided
-    if args.split in ["dev", "test"] and args.resume_from is None:
-        candidate = Path(args.save_dir) / "best_model.pt"
-        if candidate.exists():
-            args.resume_from = str(candidate)
-
-    if args.resume_from:
+    if args.resume_from and args.split in ["train", "test"]:
         checkpoint = torch.load(args.resume_from, map_location=device)
         model.load_state_dict(checkpoint['model_state_dict'])
         print(f"[Loaded checkpoint: {args.resume_from}]")
 
-    
-    # Evaluation-only:
-    if args.split in ["dev", "test"]:
-        eval_ds = dev_ds if args.split == "dev" else test_ds
-        print(f"\n[Evaluation only: {args.split}]")
+    # DEV: evaluate all epochs (no training)
+    if args.split == "dev":
+        save_dir = Path(args.save_dir)
+        ckpts = sorted(save_dir.glob("checkpoint_epoch_*.pt"),
+                    key=lambda p: int(p.stem.split("_")[-1]))
 
-        eval_loss, eval_acc = evaluate(
-            model, eval_ds, tokenizer, config, device,
-            limit=args.limit if args.limit > 0 else None
-        )
-        print(f"[{args.split.upper()}] Loss: {eval_loss:.4f} | Acc: {eval_acc:.3f}")
+        if len(ckpts) == 0:
+            raise FileNotFoundError(f"Nenhum checkpoint_epoch_*.pt em {save_dir}")
+
+        best_epoch = None
+        best_loss = float("inf")
+
+        print(f"\n[DEV] Evaluating {len(ckpts)} checkpoints...")
+        for p in ckpts:
+            epoch_num = int(p.stem.split("_")[-1])
+            ckpt = torch.load(p, map_location=device)
+            model.load_state_dict(ckpt["model_state_dict"])
+
+            dev_loss, dev_acc = evaluate(
+                model, dev_ds, tokenizer, config, device,
+                limit=args.limit if args.limit > 0 else None
+            )
+            print(f"[Dev][Epoch {epoch_num}] Loss: {dev_loss:.4f} | Acc: {dev_acc:.3f}")
+
+            if dev_loss < best_loss:
+                best_loss = dev_loss
+                best_epoch = epoch_num
+
+        print(f"\n[DEV] Best epoch by dev loss: epoch={best_epoch} dev_loss={best_loss:.4f}")
+        print(f"[DEV] Use this checkpoint for TEST:")
+        print(f"      {save_dir}/checkpoint_epoch_{best_epoch}.pt")
+        best_path = save_dir / "best_epoch.txt"
+        best_path.write_text(str(best_epoch) + "\n")
+        print(f"[DEV] Saved best epoch to {best_path}")
         return
 
-    # Optimizer and scheduler
+    # TEST: evaluate best checkpoint 
+    if args.split == "test":
+
+        # usa automaticamente o melhor do DEV
+        if not args.resume_from:
+            best_path = Path(args.save_dir) / "best_epoch.txt"
+            if not best_path.exists():
+                raise FileNotFoundError(
+                    f"Não encontrado {best_path}. "
+                    f"Rode primeiro: --split dev"
+                )
+
+            best_epoch = int(best_path.read_text().strip())
+            args.resume_from = str(
+                Path(args.save_dir) / f"checkpoint_epoch_{best_epoch}.pt"
+            )
+            print(f"[TEST] Auto resume_from = {args.resume_from}")
+
+        # carrega o checkpoint escolhido
+        checkpoint = torch.load(args.resume_from, map_location=device)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        print(f"[TEST] Loaded checkpoint: {args.resume_from}")
+
+        test_loss, test_acc = evaluate(
+            model, test_ds, tokenizer, config, device,
+            limit=args.limit if args.limit > 0 else None
+        )
+        print(f"[TEST] Loss: {test_loss:.4f} | Acc: {test_acc:.3f}")
+        return
+
+
+    # Optimizer
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=2, verbose=True
-    )
 
     # Training loop
     print("\n[Starting training...]")
@@ -258,49 +307,25 @@ def main():
             epoch+1, limit=args.limit if args.limit > 0 else None
         )
         print(f"\n[Train] Loss: {train_loss:.4f} | Acc: {train_acc:.3f}")
-        
-        # Evaluate
         if (epoch + 1) % args.eval_every == 0:
-            print("\n[Evaluating on dev set...]")
             dev_loss, dev_acc = evaluate(
                 model, dev_ds, tokenizer, config, device,
                 limit=args.limit if args.limit > 0 else None
             )
             print(f"[Dev] Loss: {dev_loss:.4f} | Acc: {dev_acc:.3f}")
-            
-            # Learning rate scheduling
-            scheduler.step(dev_loss)
-            
-            # Save best model
-            if dev_loss < best_dev_loss:
-                best_dev_loss = dev_loss
-                checkpoint_path = save_dir / "best_model.pt"
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'train_loss': train_loss,
-                    'dev_loss': dev_loss,
-                    'best_dev_loss': best_dev_loss,
-                    'config': config,
-                }, checkpoint_path)
-                print(f"[✓] Saved best model to {checkpoint_path}")
-        
+
         # Save checkpoint every epoch
         checkpoint_path = save_dir / f"checkpoint_epoch_{epoch+1}.pt"
         torch.save({
-            'epoch': epoch,
+            'epoch': epoch + 1,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'train_loss': train_loss,
-            'dev_loss': dev_loss if (epoch + 1) % args.eval_every == 0 else None,
-            'best_dev_loss': best_dev_loss,
             'config': config,
         }, checkpoint_path)
-        print(f"[✓] Saved checkpoint to {checkpoint_path}")
+        print(f"Saved checkpoint to {checkpoint_path}")
 
     print("\n[Training completed!]")
-    print(f"Best dev loss: {best_dev_loss:.4f}")
 
 if __name__ == "__main__":
     main()
