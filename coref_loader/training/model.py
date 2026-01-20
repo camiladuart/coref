@@ -67,7 +67,10 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         span_segment_ids: torch.LongTensor, 
         candidate_cluster_ids: torch.LongTensor = None,
         mention_labels: torch.LongTensor = None,  
-        genre=None, 
+        genre=None,
+        span_starts_tok=None, 
+        span_ends_tok=None,
+        return_debug: bool = False, 
     ) -> torch.Tensor:                    
 
         #pegar spans dos embeddings:
@@ -127,7 +130,13 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         span_emb = span_emb[top_indices]
         span_starts = span_starts[top_indices]
         span_ends = span_ends[top_indices]
+        
+        if span_starts_tok is not None and span_ends_tok is not None:
+            span_starts_tok = span_starts_tok[top_indices]
+            span_ends_tok   = span_ends_tok[top_indices]
+
         span_batch_idx = span_batch_idx[top_indices]
+        
         if mention_labels is not None: #(se a menção for válida)
             mention_labels = mention_labels[top_indices]
         if candidate_cluster_ids is not None:
@@ -135,6 +144,16 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         
         span_segment_ids = span_segment_ids[top_indices]
         self.last_pair_scores = self.score_span_pairs(span_emb, span_segment_ids)
+
+        if return_debug:
+            self.last_debug = {
+                "top_scores": top_scores.detach().cpu(),
+                "span_starts_tok": span_starts_tok.detach().cpu() if span_starts_tok is not None else None,
+                "span_ends_tok": span_ends_tok.detach().cpu() if span_ends_tok is not None else None,
+                "pair_scores": self.last_pair_scores.detach().cpu(),
+            }
+        else:
+            self.last_debug = None
 
         # pega top-c antecedentes por span
         top_antecedents, top_antecedents_mask, top_antecedent_scores = \
@@ -188,7 +207,7 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         gold_cluster_ids_all,
         max_span_width: int = 30,
         genre=None,
-        span_segment_ids=None,
+        span_segment_ids=None, return_debug: bool = False
     ):  
     # juntar sentenças e construir sentence_map
         tokens, sentence_map = flatten_sentences(seg_sents)
@@ -229,7 +248,9 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
     
         # gerando candidatos (que não cruzam sentença, largura <= max_span_width)
         span_starts, span_ends = build_candidates(sentence_map, max_span_width)
-        
+        span_starts_tok = span_starts.clone()
+        span_ends_tok = span_ends.clone()
+
         # cada span candidato pertence ao segmento atual
         span_segment_ids = torch.full(
             (span_starts.size(0),),
@@ -303,6 +324,9 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
             mention_labels=mention_labels, 
             genre=genre,   
             span_segment_ids=span_segment_ids,
+            span_starts_tok=span_starts_tok.to(device),
+            span_ends_tok=span_ends_tok.to(device),
+            return_debug=return_debug,
         )
 
         return logits, mention_labels.to(device), loss

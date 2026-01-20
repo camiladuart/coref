@@ -148,13 +148,17 @@ def main():
     ap.add_argument("--data_dir", required=True, help="Pasta com *.english.jsonlines")
     ap.add_argument("--split", default="train", choices=["train", "dev", "test"])
     ap.add_argument("--limit", type=int, default=0, help="Quantos docs usar (0 = todos)")
-    
+
     # Training arguments
     ap.add_argument("--epochs", type=int, default=20, help="Número de épocas")
     ap.add_argument("--lr", type=float, default=2e-5, help="Learning rate")
     ap.add_argument("--eval_every", type=int, default=1, help="Avaliar a cada N épocas")
     ap.add_argument("--save_dir", type=str, default="checkpoints", help="Diretório para salvar modelos")
     ap.add_argument("--resume_from", type=str, default=None, help="Checkpoint para continuar treinamento")
+    
+    ap.add_argument("--inspect", action="store_true", help="Inspeciona 1 doc do split.")
+    ap.add_argument("--inspect_idx", type=int, default=0, help="Índice do documento a inspecionar no split.")
+    ap.add_argument("--thresh", type=float, default=0.5, help="Threshold para considerar mention.")
     
     args = ap.parse_args()
 
@@ -194,8 +198,6 @@ def main():
     elif args.split == "test":
         test_ds = CorefDataset(args.data_dir, "test", config)
         print(f"[OK] Test: {len(test_ds)} docs")
-
-
     
     # Auto-detect genres
     if config.get("use_genre", False):
@@ -208,7 +210,6 @@ def main():
 
         if len(all_genres) == 0:
             raise ValueError("Auto-detect de gêneros vazio (nenhum 'genre' encontrado no split).")
-
 
     # Model, tokenizer, device
     tokenizer = AutoTokenizer.from_pretrained(config["encoder_name"])
@@ -223,6 +224,124 @@ def main():
         checkpoint = torch.load(args.resume_from, map_location=device)
         model.load_state_dict(checkpoint['model_state_dict'])
         print(f"[Loaded checkpoint: {args.resume_from}]")
+
+    def union_find_clusters(n, links):
+        parent = list(range(n))
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+        def union(a,b):
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[rb] = ra
+        for a,b in links:
+            union(a,b)
+        groups = {}
+        for i in range(n):
+            r = find(i)
+            groups.setdefault(r, []).append(i)
+        return list(groups.values())
+
+    def inspect_one_doc(model, ex, tokenizer, config, device, thresh=0.5):
+        model.eval()
+        print(f"\nDOC_KEY: {ex.get('doc_key','(sem doc_key)')}")
+        print(f"GENRE: {ex.get('genre', None)}")
+        sentences = ex["sentences"]
+        print(f"Num sentences: {len(sentences)}")
+
+        gold_starts_all, gold_ends_all, gold_cluster_ids_all = extract_gold_spans_with_clusters(ex)
+        genre = ex.get("genre", None)
+
+        with torch.no_grad():
+            for seg_start, seg_sents in sentence_chunks(sentences, config["max_segment_len"]):
+                logits, mention_labels, loss = model.forward(
+                    sentences=sentences,
+                    seg_start=seg_start,
+                    seg_sents=seg_sents,
+                    tokenizer=tokenizer,
+                    gold_starts_all=gold_starts_all,
+                    gold_ends_all=gold_ends_all,
+                    gold_cluster_ids_all=gold_cluster_ids_all,
+                    max_span_width=config["max_span_width"],
+                    genre=genre,
+                    return_debug=True,
+                )
+
+                dbg = getattr(model, "last_debug", None)
+                if dbg is None or dbg["span_starts_tok"] is None:
+                    print(f"\nSegment {seg_start}: (sem spans no beam)")
+                    continue
+
+                probs = torch.sigmoid(logits).detach().cpu()
+                starts = dbg["span_starts_tok"].numpy().tolist()
+                ends   = dbg["span_ends_tok"].numpy().tolist()
+                pair   = dbg["pair_scores"].numpy()
+
+                # tokens do segmento
+                seg_tokens = [w for sent in seg_sents for w in sent]
+
+                # spans acima do threshold
+                kept = [i for i,p in enumerate(probs) if float(p) >= thresh]
+                print(f"\nSEGMENT start={seg_start} | spans_no_beam={len(probs)} | kept>={thresh} = {len(kept)}")
+                if len(kept) == 0:
+                    continue
+
+                # imprimir spans
+                for i in kept[:20]:
+                    s,e = starts[i], ends[i]
+                    if 0 <= s <= e < len(seg_tokens):
+                        txt = " ".join(seg_tokens[s:e+1])
+                    else:
+                        txt = "(fora do range)"
+                    print(f"  span[{i:3d}] prob={float(probs[i]):.3f} tok=({s},{e}) text='{txt}'")
+
+                # links: melhor antecedente com score > 0
+                links = []
+                for i in kept:
+                    if i == 0:
+                        continue
+                    row = pair[i][:i]
+                    j = int(row.argmax()) if len(row) > 0 else -1
+                    if j >= 0 and row[j] > 0:
+                        links.append((i, j))
+
+                print("\nLinks (span_i -> antecedente_j) com score>0:")
+                for i,j in links[:30]:
+                    print(f"  {i} -> {j}  score={pair[i][j]:.3f}")
+
+                clusters = union_find_clusters(len(probs), links)
+                # só clusters que têm pelo menos 2 spans e estão no kept
+                clusters = [
+                    [x for x in c if x in kept]
+                    for c in clusters
+                ]
+                clusters = [c for c in clusters if len(c) >= 2]
+
+                print("\nClusters (apenas size>=2):")
+                if not clusters:
+                    print("  (nenhum cluster com size>=2)")
+                for k,c in enumerate(clusters, 1):
+                    pieces = []
+                    for idx in c:
+                        s,e = starts[idx], ends[idx]
+                        txt = " ".join(seg_tokens[s:e+1]) if 0 <= s <= e < len(seg_tokens) else "(fora do range)"
+                        pieces.append(f"{idx}:{txt}")
+                    print(f"  Cluster {k}: " + " | ".join(pieces))
+
+    if args.inspect:
+        # escolhe o split certo
+        if args.split == "train":
+            ds = train_ds
+        elif args.split == "dev":
+            ds = dev_ds
+        else:
+            ds = test_ds
+
+        ex = ds[args.inspect_idx]
+        inspect_one_doc(model, ex, tokenizer, config, device, thresh=args.thresh)
+        return
 
     # DEV: evaluate all epochs (no training)
     if args.split == "dev":
