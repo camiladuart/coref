@@ -158,7 +158,7 @@ def main():
     
     ap.add_argument("--inspect", action="store_true", help="Inspeciona 1 doc do split.")
     ap.add_argument("--inspect_idx", type=int, default=0, help="Índice do documento a inspecionar no split.")
-    ap.add_argument("--thresh", type=float, default=0.5, help="Threshold para considerar mention.")
+    ap.add_argument("--thresh", type=float, default=0.2, help="Threshold para considerar mention.")
     
     args = ap.parse_args()
 
@@ -244,7 +244,7 @@ def main():
             groups.setdefault(r, []).append(i)
         return list(groups.values())
 
-    def inspect_one_doc(model, ex, tokenizer, config, device, thresh=0.5):
+    def inspect_one_doc(model, ex, tokenizer, config, device, thresh=args.thresh):
         model.eval()
         print(f"\nDOC_KEY: {ex.get('doc_key','(sem doc_key)')}")
         print(f"GENRE: {ex.get('genre', None)}")
