@@ -278,6 +278,12 @@ def main():
                 starts = dbg["span_starts_tok"].numpy().tolist()
                 ends   = dbg["span_ends_tok"].numpy().tolist()
                 pair   = dbg["pair_scores"].numpy()
+                
+                #debug extra. mostrar top spans mesmo se threshold n for passado
+                topk = min(10, len(probs))
+                vals, idxs = torch.topk(probs, k=topk)
+                print("Top probs:", [float(v) for v in vals])
+
 
                 # tokens do segmento
                 seg_tokens = [w for sent in seg_sents for w in sent]
@@ -286,6 +292,11 @@ def main():
                 kept = [i for i,p in enumerate(probs) if float(p) >= thresh]
                 print(f"\nSEGMENT start={seg_start} | spans_no_beam={len(probs)} | kept>={thresh} = {len(kept)}")
                 if len(kept) == 0:
+                    # mostra os top-10 spans mesmo sem passar o threshold
+                    for i in idxs.tolist():
+                        s,e = starts[i], ends[i]
+                        txt = " ".join(seg_tokens[s:e+1]) if 0 <= s <= e < len(seg_tokens) else "(fora do range)"
+                        print(f"  TOP span[{i:3d}] prob={float(probs[i]):.3f} tok=({s},{e}) text='{txt}'")
                     continue
 
                 # imprimir spans
