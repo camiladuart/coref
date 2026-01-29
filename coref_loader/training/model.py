@@ -296,17 +296,6 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
                 torch.tensor(0.0, device=next(self.parameters()).device)
 
         keep_mask = torch.tensor(keep_mask, dtype=torch.bool, device=span_starts.device)
-
-        # filtra spans em token space e labels/cluster
-        span_starts_tok = span_starts_tok[keep_mask]
-        span_ends_tok   = span_ends_tok[keep_mask]
-        mention_labels  = mention_labels[keep_mask]
-        candidate_cluster_ids = candidate_cluster_ids[keep_mask]
-        span_segment_ids = span_segment_ids[keep_mask]
-        #substitui os spans por wp space (consertando erro anterior BERT)
-        span_starts = torch.tensor(span_start_wp, dtype=torch.long, device=span_starts.device)
-        span_ends   = torch.tensor(span_end_wp,   dtype=torch.long, device=span_ends.device)
-
         
         #rótulos 0/1: se o candidato coincide com algum gold (menção ou não)
         mention_labels = self.get_candidate_labels(
@@ -322,6 +311,17 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
             gold_cluster_ids  
         )
 
+
+        # filtra spans em token space e labels/cluster
+        span_starts_tok = span_starts_tok[keep_mask]
+        span_ends_tok   = span_ends_tok[keep_mask]
+        mention_labels  = mention_labels[keep_mask]
+        candidate_cluster_ids = candidate_cluster_ids[keep_mask]
+        span_segment_ids = span_segment_ids[keep_mask]
+        #substitui os spans por wp space (consertando erro anterior BERT)
+        span_starts = torch.tensor(span_start_wp, dtype=torch.long, device=span_starts.device)
+        span_ends   = torch.tensor(span_end_wp,   dtype=torch.long, device=span_ends.device)
+        
         #para todos os tensores que entram em _forward_wp estarem no mesmo device:
         device = next(self.parameters()).device
         span_starts = span_starts.to(device)
