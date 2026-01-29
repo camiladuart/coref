@@ -188,7 +188,7 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
 
 
         if candidate_cluster_ids is not None and candidate_cluster_ids.numel() > 0:
-            loss = self.coref_marginal_loss_with_dummy(
+            loss = loss + self.coref_marginal_loss_with_dummy(
                 self.last_pair_scores,
                 candidate_cluster_ids.to(device),
             )
@@ -278,15 +278,36 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
 
 
         # wordpiece: converter spans tokens-> wp usando first_wp/last_wp
-        span_start_wp, span_end_wp = [], []
+        keep_mask = []
+        span_start_wp = []
+        span_end_wp = []
+
         for s, e in zip(span_starts.tolist(), span_ends.tolist()):
             fs, le = first_wp[s], last_wp[e]
-            if 0 <= fs <= le < T_wp:
+            ok = (0 <= fs <= le < T_wp)
+            keep_mask.append(ok)
+            if ok:
                 span_start_wp.append(fs)
                 span_end_wp.append(le)
-        if not span_start_wp:
-            return torch.empty(0, device=next(self.parameters()).device), torch.empty(0, dtype=torch.long, device=next(self.parameters()).device), torch.tensor(0.0, device=next(self.parameters()).device)
 
+        if len(span_start_wp) == 0:
+            return torch.empty(0, device=next(self.parameters()).device), \
+                torch.empty(0, dtype=torch.long, device=next(self.parameters()).device), \
+                torch.tensor(0.0, device=next(self.parameters()).device)
+
+        keep_mask = torch.tensor(keep_mask, dtype=torch.bool, device=span_starts.device)
+
+        # filtra spans em token space e labels/cluster
+        span_starts_tok = span_starts_tok[keep_mask]
+        span_ends_tok   = span_ends_tok[keep_mask]
+        mention_labels  = mention_labels[keep_mask]
+        candidate_cluster_ids = candidate_cluster_ids[keep_mask]
+        span_segment_ids = span_segment_ids[keep_mask]
+        #substitui os spans por wp space (consertando erro anterior BERT)
+        span_starts = torch.tensor(span_start_wp, dtype=torch.long, device=span_starts.device)
+        span_ends   = torch.tensor(span_end_wp,   dtype=torch.long, device=span_ends.device)
+
+        
         #rótulos 0/1: se o candidato coincide com algum gold (menção ou não)
         mention_labels = self.get_candidate_labels(
             span_starts, span_ends,
