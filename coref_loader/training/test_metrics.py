@@ -14,16 +14,16 @@ def _flatten_clusters(clusters):
             m2c[m] = ci #mençao m pertence ao cluster ci
     return m2c #dicionario final
 
-#metrica MUC (conta links necessários para conectar cada cluster):
+#metrica MUC (mede se o modelo colocou as mencoes certas juntas):
 def muc_f1(pred_clusters, gold_clusters):
     def muc_counts(clusters, other_m2c):
-        tp = 0
-        p = 0
+        tp = 0 #quantos links o modelo acertou
+        p = 0 #n total de links
         for cl in clusters:
             if len(cl) <= 1:
                 continue
-            p += len(cl) - 1
-            #quantos "partitions" do cl no outro clustering:
+            p += len(cl) - 1 #max de links possiveis no cluster
+            #ve se as mençoes foram separadas em outros clusters:
             parts = set()
             for m in cl:
                 parts.add(other_m2c.get(m, ("singleton", m)))
@@ -32,10 +32,11 @@ def muc_f1(pred_clusters, gold_clusters):
 
     gold_m2c = _flatten_clusters(gold_clusters)
     pred_m2c = _flatten_clusters(pred_clusters)
-
+    
+    #precision e recall:
     tp_p, p = muc_counts(pred_clusters, gold_m2c)
     tp_r, r = muc_counts(gold_clusters, pred_m2c)
-
+    
     prec = tp_p / p if p > 0 else 0.0
     rec  = tp_r / r if r > 0 else 0.0
     f1 = (2*prec*rec/(prec+rec)) if (prec+rec) > 0 else 0.0
@@ -43,17 +44,17 @@ def muc_f1(pred_clusters, gold_clusters):
 
 #B3 (precision e recall por mençao)
 def b3_f1(pred_clusters, gold_clusters):
-    gold_m2c = {}
+    gold_m2c = {} #cria dicionario p cluster gold da mençao:
     for cl in gold_clusters:
         for m in cl:
             gold_m2c[m] = set(cl)
-
-    pred_m2c = {}
+            
+    pred_m2c = {} #cria dicionario com o que o modelo previu:
     for cl in pred_clusters:
         for m in cl:
             pred_m2c[m] = set(cl)
 
-    mentions = set(gold_m2c.keys()) | set(pred_m2c.keys())
+    mentions = set(gold_m2c.keys()) | set(pred_m2c.keys()) #junta as mençoes do gold e previstas
     if not mentions:
         return 0.0
 
@@ -62,7 +63,7 @@ def b3_f1(pred_clusters, gold_clusters):
     for m in mentions:
         g = gold_m2c.get(m, {m})
         p = pred_m2c.get(m, {m})
-        inter = len(g & p)
+        inter = len(g & p) #mençoes que coincidem g e p 
         prec_sum += inter / len(p)
         rec_sum  += inter / len(g)
 
@@ -71,12 +72,12 @@ def b3_f1(pred_clusters, gold_clusters):
     f1 = (2*prec*rec/(prec+rec)) if (prec+rec) > 0 else 0.0
     return f1
 
-#CEAF-e (matching clusters maximizando soma de similaridade) via greedy
+#CEAF-e = similaridade baseada em clusters
 def ceaf_e_f1(pred_clusters, gold_clusters):
     if not pred_clusters and not gold_clusters:
         return 0.0
 
-    #similarity matrix
+    #similarity matrix (compara cluster pred com cluster gold)
     sim = []
     for pc in pred_clusters:
         pc_set = set(pc)
@@ -85,9 +86,9 @@ def ceaf_e_f1(pred_clusters, gold_clusters):
             row.append(len(pc_set & set(gc)))
         sim.append(row)
 
-    used_g = set()
-    total = 0
-    for i in range(len(pred_clusters)):
+    used_g = set() #clusters gold ja usados
+    total = 0 #soma da similaridade
+    for i in range(len(pred_clusters)): #para cada cluster previsto, escolher o melhor cluster gold:
         best_j = -1
         best = -1
         for j in range(len(gold_clusters)):
@@ -100,18 +101,15 @@ def ceaf_e_f1(pred_clusters, gold_clusters):
             used_g.add(best_j)
             total += best
 
-    #normalizações:
     pred_denom = sum(len(c) for c in pred_clusters)
     gold_denom = sum(len(c) for c in gold_clusters)
-
     prec = total / pred_denom if pred_denom > 0 else 0.0
     rec  = total / gold_denom if gold_denom > 0 else 0.0
     f1 = (2*prec*rec/(prec+rec)) if (prec+rec) > 0 else 0.0
     return f1
 
 
-#
-
+#função union pra agrupar mençoes nos clusters:
 def union_find(n, links):
     parent = list(range(n))
 
@@ -120,15 +118,13 @@ def union_find(n, links):
             parent[x] = parent[parent[x]]
             x = parent[x]
         return x
-
+    
     def union(a, b):
         ra, rb = find(a), find(b)
         if ra != rb:
             parent[rb] = ra
-
     for a, b in links:
         union(a, b)
-
     groups = {}
     for i in range(n):
         r = find(i)
@@ -197,19 +193,25 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                 # offset de tokens antes deste segmento no doc
                 seg_token_offset = sent_prefix[seg_start]
 
-                # adiciona menções preditas (todas do beam)
-                base = len(pred_mentions)
-                for s, e in zip(starts_seg, ends_seg):
-                    pred_mentions.append((seg_token_offset + s, seg_token_offset + e))
+                #so entra no cluster o que for menção
+                labels = dbg["mention_labels"].detach().cpu().tolist()
+
+                beam_to_pred = {}   # mapa: índice do beam -> índice em pred_mentions
+                for i, ((s, e), lab) in enumerate(zip(zip(starts_seg, ends_seg), labels)):
+                    if lab == 1:
+                        beam_to_pred[i] = len(pred_mentions)
+                        pred_mentions.append((seg_token_offset + s,
+                                            seg_token_offset + e))
 
                 # links via pair_scores (argmax antecedente se score>0)
                 pair = dbg["pair_scores"].detach().cpu().numpy()
-                n = len(starts_seg)
-                for i in range(1, n):
+                for i in range(1, len(starts_seg)):
+                    if i not in beam_to_pred:
+                        continue
                     row = pair[i][:i]
                     j = int(row.argmax()) if len(row) > 0 else -1
-                    if j >= 0 and row[j] > 0:
-                        pred_links.append((base + i, base + j))
+                    if j in beam_to_pred and row[j] > 0.5:
+                        pred_links.append((beam_to_pred[i], beam_to_pred[j]))
 
             # se não tiver menções, vira tudo zero
             if len(pred_mentions) == 0:
@@ -292,11 +294,11 @@ def main():
         model, test_ds, tokenizer, config, device, limit=args.limit
     )
 
-    print("\n========= TEST METRICS =========")
+    print("\nTEST METRICS:")
     print(f"MUC   F1:  {muc:.4f}")
     print(f"B³    F1:  {b3:.4f}")
     print(f"CEAF-e F1: {ceaf:.4f}")
-    print("================================\n")
+    print("\n")
 
 if __name__ == "__main__":
     main()
