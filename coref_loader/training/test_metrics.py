@@ -158,6 +158,15 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                     continue
                 gold_by_cid.setdefault(cid, []).append((s, e))
             gold_clusters = list(gold_by_cid.values())
+            
+            # achatar gold para set de menções
+            gold_mentions = [m for cl in gold_clusters for m in cl]
+            gold_set = set(gold_mentions)
+
+            if doc_i == 0:
+                print("\n===== DOC 0 checando =====", flush=True)
+                print("Exemplo gold mentions (primeiras 20):", gold_mentions[:20], flush=True)
+
 
             # offsets para converter spans do segmento -> doc token index
             sent_lens = [len(s) for s in sentences]
@@ -180,6 +189,7 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                     gold_cluster_ids_all=gold_cluster_ids_all,
                     max_span_width=config["max_span_width"],
                     genre=genre,
+                    return_debug=True,
                 )
 
                 dbg = getattr(model, "last_debug", None)
@@ -192,18 +202,22 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
 
                 # offset de tokens antes deste segmento no doc
                 seg_token_offset = sent_prefix[seg_start]
-
-                #so entra no cluster o que for menção
-                labels = dbg["mention_labels"].detach().cpu().tolist()
-
-                beam_to_pred = {}   # mapa: índice do beam -> índice em pred_mentions
-                for i, ((s, e), lab) in enumerate(zip(zip(starts_seg, ends_seg), labels)):
-                    if lab == 1:
+                
+                probs = torch.sigmoid(logits).detach().cpu().tolist()
+                beam_to_pred = {}   # índice do beam -> índice em pred_mentions
+                for i, (s, e, p) in enumerate(zip(starts_seg, ends_seg, probs)):
+                    if p >= 0.5:  # threshold de menção (podes ajustar depois)
                         beam_to_pred[i] = len(pred_mentions)
-                        pred_mentions.append((seg_token_offset + s,
-                                            seg_token_offset + e))
+                        pred_mentions.append((seg_token_offset + s, seg_token_offset + e))
 
-                # links via pair_scores (argmax antecedente se score>0)
+                if doc_i == 0 and seg_start == 0:
+                    top = sorted([(p,i) for i,p in enumerate(probs)], reverse=True)[:10]
+                    print("\nTop10 mention probs (prob, idx):", top)
+                    print("Exemplo spans (idx, start,end,prob):")
+                    for p,i in top[:5]:
+                        print(i, starts_seg[i], ends_seg[i], p)
+
+                # links 
                 pair = dbg["pair_scores"].detach().cpu().numpy()
                 for i in range(1, len(starts_seg)):
                     if i not in beam_to_pred:
@@ -212,6 +226,32 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                     j = int(row.argmax()) if len(row) > 0 else -1
                     if j in beam_to_pred and row[j] > 0.5:
                         pred_links.append((beam_to_pred[i], beam_to_pred[j]))
+
+            if doc_i == 0:
+                print("\n===== DEBUG DOC 0 =====")
+                print("Gold clusters:", gold_clusters[:5], flush=True)
+                print("Num gold clusters:", len(gold_clusters), flush=True)
+                print("Pred mentions até agora:", len(pred_mentions), flush=True)
+                print("Pred links até agora:", len(pred_links), flush=True)
+
+
+            pred_set = set(pred_mentions)
+            overlap = len(pred_set & gold_set)
+
+            if doc_i == 0:
+                print("Num pred_mentions:", len(pred_mentions), flush=True)
+                print("Overlap pred∩gold (mesma tupla start,end):", overlap, flush=True)
+
+                # teste (CHAT))
+                gold_set_end_minus1 = set((s, e-1) for (s, e) in gold_set)
+                overlap2 = len(pred_set & gold_set_end_minus1)
+                print("Overlap se gold_end-1:", overlap2, flush=True)
+
+                # teste (CHAT)
+                pred_set_end_minus1 = set((s, e-1) for (s, e) in pred_set)
+                overlap3 = len(pred_set_end_minus1 & gold_set)
+                print("Overlap se pred_end-1:", overlap3, flush=True)
+                print("================================\n", flush=True)
 
             # se não tiver menções, vira tudo zero
             if len(pred_mentions) == 0:
