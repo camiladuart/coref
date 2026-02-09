@@ -226,6 +226,20 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
             for cl in pred_clusters_idx:
                 pred_clusters.append([pred_mentions[i] for i in cl])
 
+            #quero ver o primeiro doc
+            if doc_i == 0:
+                print("\n========== DEBUG DOC 0 ==========")
+
+                print("\nGOLD CLUSTERS:")
+                for i, cl in enumerate(gold_clusters):
+                    print(f"Gold {i}: {cl}")
+
+                print("\nPREDICTED CLUSTERS:")
+                for i, cl in enumerate(pred_clusters):
+                    print(f"Pred {i}: {cl}")
+
+                print("\n=================================\n")
+            
             # calcula métricas por documento
             doc_muc.append(muc_f1(pred_clusters, gold_clusters))
             doc_b3.append(b3_f1(pred_clusters, gold_clusters))
