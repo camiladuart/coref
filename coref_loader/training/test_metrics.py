@@ -149,7 +149,7 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
             gold_starts_all, gold_ends_all, gold_cluster_ids_all = extract_gold_spans_with_clusters(ex)
             genre = ex.get("genre", None)
 
-            # gold clusters em token-space do DOC (start,end)
+            # gold clusters (start,end)
             gold_by_cid = {}
             for s, e, cid in zip(gold_starts_all.tolist(),
                                 gold_ends_all.tolist(),
@@ -165,18 +165,16 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
 
             if doc_i == 0:
                 print("\n===== DOC 0 checando =====", flush=True)
-                print("Exemplo gold mentions (primeiras 20):", gold_mentions[:20], flush=True)
+                print("Exemplo gold mentions:", gold_mentions[:20], flush=True)
 
-
-            # offsets para converter spans do segmento -> doc token index
             sent_lens = [len(s) for s in sentences]
-            sent_prefix = [0]
+            sent_prefix = [0] # sent_prefix[k] = tokens antes da sentence k
             for L in sent_lens:
                 sent_prefix.append(sent_prefix[-1] + L)
-            # sent_prefix[k] = tokens antes da sentence k
+        
 
-            pred_mentions = []   # lista global de spans preditos (start,end) em doc token space
-            pred_links = []      # links entre índices dessa lista (i->j)
+            pred_mentions = []   #spans pred em lista
+            pred_links = []  #links entre índices dessa lista (i->j)
 
             for seg_start, seg_sents in sentence_chunks(sentences, config["max_segment_len"]):
                 logits, mention_labels, loss = model.forward(
@@ -206,7 +204,7 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                 probs = torch.sigmoid(logits).detach().cpu().tolist()
                 beam_to_pred = {}   # índice do beam -> índice em pred_mentions
                 for i, (s, e, p) in enumerate(zip(starts_seg, ends_seg, probs)):
-                    if p >= 0.5:  # threshold de menção (podes ajustar depois)
+                    if p >= 0.5:  # threshold de menção
                         beam_to_pred[i] = len(pred_mentions)
                         pred_mentions.append((seg_token_offset + s, seg_token_offset + e))
 
@@ -217,7 +215,7 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                     for p,i in top[:5]:
                         print(i, starts_seg[i], ends_seg[i], p)
 
-                # links 
+                # links:
                 pair = dbg["pair_scores"].detach().cpu().numpy()
                 for i in range(1, len(starts_seg)):
                     if i not in beam_to_pred:
@@ -226,32 +224,28 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                     j = int(row.argmax()) if len(row) > 0 else -1
                     if j in beam_to_pred and row[j] > 0.5:
                         pred_links.append((beam_to_pred[i], beam_to_pred[j]))
-
+                        
+            #debug:
             if doc_i == 0:
                 print("\n===== DEBUG DOC 0 =====")
                 print("Gold clusters:", gold_clusters[:5], flush=True)
                 print("Num gold clusters:", len(gold_clusters), flush=True)
-                print("Pred mentions até agora:", len(pred_mentions), flush=True)
-                print("Pred links até agora:", len(pred_links), flush=True)
+                print("Num pred mentions:", len(pred_mentions), flush=True)
+                print("Num pred links:", len(pred_links), flush=True)
 
-
+            #TESTES debug: 
             pred_set = set(pred_mentions)
             overlap = len(pred_set & gold_set)
-
             if doc_i == 0:
-                print("Num pred_mentions:", len(pred_mentions), flush=True)
-                print("Overlap pred∩gold (mesma tupla start,end):", overlap, flush=True)
-
-                # teste (CHAT))
+                print("Overlap pred∩gold (same start, end):", overlap, flush=True)
+                #TESTES (estava dando tudo 0): se eram erros de +1 -1 nos spans start, end:
                 gold_set_end_minus1 = set((s, e-1) for (s, e) in gold_set)
                 overlap2 = len(pred_set & gold_set_end_minus1)
                 print("Overlap se gold_end-1:", overlap2, flush=True)
-
-                # teste (CHAT)
                 pred_set_end_minus1 = set((s, e-1) for (s, e) in pred_set)
                 overlap3 = len(pred_set_end_minus1 & gold_set)
                 print("Overlap se pred_end-1:", overlap3, flush=True)
-                print("================================\n", flush=True)
+                print("================================\n", flush=True) #deu 0 ent ok 
 
             # se não tiver menções, vira tudo zero
             if len(pred_mentions) == 0:
@@ -265,6 +259,10 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
             pred_clusters = []
             for cl in pred_clusters_idx:
                 pred_clusters.append([pred_mentions[i] for i in cl])
+            #criando lista de tokens do doc: 
+            doc_tokens = []
+            for sent in sentences:
+                doc_tokens.extend(sent)
 
             #quero ver o primeiro doc
             if doc_i == 0:
@@ -273,14 +271,20 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                 print("\nGOLD CLUSTERS:")
                 for i, cl in enumerate(gold_clusters):
                     print(f"Gold {i}: {cl}")
+                    for (s, e) in cl:
+                        span_text = " ".join(doc_tokens[s:e+1])
+                        print(f"  ({s},{e}) -> \"{span_text}\"")
 
                 print("\nPREDICTED CLUSTERS:")
                 for i, cl in enumerate(pred_clusters):
                     print(f"Pred {i}: {cl}")
+                    for (s, e) in cl:
+                        span_text = " ".join(doc_tokens[s:e+1])
+                        print(f"  ({s},{e}) -> \"{span_text}\"")
 
                 print("\n=================================\n")
             
-            # calcula métricas por documento
+            #métricas por doc
             doc_muc.append(muc_f1(pred_clusters, gold_clusters))
             doc_b3.append(b3_f1(pred_clusters, gold_clusters))
             doc_ceaf.append(ceaf_e_f1(pred_clusters, gold_clusters))
