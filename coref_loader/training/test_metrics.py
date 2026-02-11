@@ -132,13 +132,35 @@ def union_find(n, links):
 
     return list(groups.values())
 
+#uso na evaluate p MUC:
+def muc_counts(clusters, other_m2c):
+    tp = 0
+    p = 0
+    for cl in clusters:
+        if len(cl) <= 1:
+            continue
+        p += len(cl) - 1
+        parts = set()
+        for m in cl:
+            parts.add(other_m2c.get(m, ("singleton", m)))
+        tp += (len(cl) - len(parts))
+    return tp, p
+
 #funçao evaluate:
 def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
     model.eval()
-
-    doc_muc = []
-    doc_b3 = []
-    doc_ceaf = []
+    # acumuladores globais (eu estava fazendo media por doc -> metricas altas -> alteraçao:)
+    total_muc_tp_p = 0
+    total_muc_p = 0
+    total_muc_tp_r = 0
+    total_muc_r = 0
+    total_b3_prec_num = 0
+    total_b3_prec_den = 0
+    total_b3_rec_num = 0
+    total_b3_rec_den = 0
+    total_ceaf_sim = 0
+    total_ceaf_pred = 0
+    total_ceaf_gold = 0
 
     with torch.no_grad():
         for doc_i, ex in enumerate(test_ds):
@@ -249,7 +271,6 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
 
             # se não tiver menções, vira tudo zero
             if len(pred_mentions) == 0:
-                doc_muc.append(0.0); doc_b3.append(0.0); doc_ceaf.append(0.0)
                 continue
 
             # clusters preditos por union-find (em índices)
@@ -284,16 +305,77 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
 
                 print("\n=================================\n")
             
-            #métricas por doc
-            doc_muc.append(muc_f1(pred_clusters, gold_clusters))
-            doc_b3.append(b3_f1(pred_clusters, gold_clusters))
-            doc_ceaf.append(ceaf_e_f1(pred_clusters, gold_clusters))
+            #Calculo das metricas pos alteracoes (sem ser media por doc -> numeros altissimos). MUC:
+            tp_p, p = muc_counts(pred_clusters, _flatten_clusters(gold_clusters))
+            tp_r, r = muc_counts(gold_clusters, _flatten_clusters(pred_clusters))
+            total_muc_tp_p += tp_p
+            total_muc_p += p
+            total_muc_tp_r += tp_r
+            total_muc_r += r
+            #b3:
+            gold_m2c = {}
+            for cl in gold_clusters:
+                for m in cl:
+                    gold_m2c[m] = set(cl)
 
-    # média no dataset
-    MUC = sum(doc_muc)/len(doc_muc) if doc_muc else 0.0
-    B3  = sum(doc_b3)/len(doc_b3) if doc_b3 else 0.0
-    CEAF= sum(doc_ceaf)/len(doc_ceaf) if doc_ceaf else 0.0
-    return MUC, B3, CEAF
+            pred_m2c = {}
+            for cl in pred_clusters:
+                for m in cl:
+                    pred_m2c[m] = set(cl)
+
+            mentions = set(gold_m2c.keys()) | set(pred_m2c.keys())
+
+            for m in mentions:
+                g = gold_m2c.get(m, {m})
+                p_set = pred_m2c.get(m, {m})
+                inter = len(g & p_set)
+
+                total_b3_prec_num += inter
+                total_b3_prec_den += len(p_set)
+
+                total_b3_rec_num += inter
+                total_b3_rec_den += len(g)
+
+            #CEAFe
+            sim = []
+            for pc in pred_clusters:
+                pc_set = set(pc)
+                row = []
+                for gc in gold_clusters:
+                    row.append(len(pc_set & set(gc)))
+                sim.append(row)
+
+            used_g = set()
+            for i in range(len(pred_clusters)):
+                best_j = -1
+                best = -1
+                for j in range(len(gold_clusters)):
+                    if j in used_g:
+                        continue
+                    if sim[i][j] > best:
+                        best = sim[i][j]
+                        best_j = j
+                if best_j >= 0 and best > 0:
+                    used_g.add(best_j)
+                    total_ceaf_sim += best
+
+            total_ceaf_pred += sum(len(c) for c in pred_clusters)
+            total_ceaf_gold += sum(len(c) for c in gold_clusters)
+
+    #calculos finais: MUC:
+    muc_prec = total_muc_tp_p / total_muc_p if total_muc_p > 0 else 0.0
+    muc_rec  = total_muc_tp_r / total_muc_r if total_muc_r > 0 else 0.0
+    muc_f1 = (2*muc_prec*muc_rec/(muc_prec+muc_rec)) if (muc_prec+muc_rec)>0 else 0.0
+    #b3:
+    b3_prec = total_b3_prec_num / total_b3_prec_den if total_b3_prec_den>0 else 0.0
+    b3_rec  = total_b3_rec_num  / total_b3_rec_den  if total_b3_rec_den>0 else 0.0
+    b3_f1 = (2*b3_prec*b3_rec/(b3_prec+b3_rec)) if (b3_prec+b3_rec)>0 else 0.0
+    #ceafe:
+    ceaf_prec = total_ceaf_sim / total_ceaf_pred if total_ceaf_pred>0 else 0.0
+    ceaf_rec  = total_ceaf_sim / total_ceaf_gold if total_ceaf_gold>0 else 0.0
+    ceaf_f1 = (2*ceaf_prec*ceaf_rec/(ceaf_prec+ceaf_rec)) if (ceaf_prec+ceaf_rec)>0 else 0.0
+
+    return muc_f1, b3_f1, ceaf_f1
 
 
 def main():
