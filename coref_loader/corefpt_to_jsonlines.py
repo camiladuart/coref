@@ -1,199 +1,126 @@
-#CorefPT (XML) -> JSONLines (doc_key + sentences + clusters)
+import os
 import json
-import re
-import xml.etree.ElementTree as ET
-from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+import argparse
+from collections import defaultdict
 
-#helpers de normalização de spans
-SPAN_RE = re.compile(r"(\d+)\s*(?:\.\.|-)\s*(\d+)")
-INT_RE = re.compile(r"\d+")
 
-#aceitar spans tipo "12..15", "12-15", "12 13 14 15", "w12..w15" e retornar lista de (start,end):
-def parse_span_text(span_text: str) -> List[Tuple[int, int]]:
-    if not span_text:
-        return []
-    t = span_text.strip()
+def parse_coref_column(coref_str, token_index, open_mentions):
+    """
+    Interpreta coluna de coref estilo SemEval.
+    Exemplos:
+        (1
+        1)
+        (2)
+        -
+    """
+    if coref_str == "-" or coref_str == "_":
+        return
 
-    #caso 12..15 ou 12-15
-    m = SPAN_RE.search(t)
-    if m:
-        a = int(m.group(1))
-        b = int(m.group(2))
-        if a <= b:
-            return [(a, b)]
-        return [(b, a)]
+    parts = coref_str.split("|")
 
-    #caso lista de números (pega min/max)
-    nums = [int(x) for x in INT_RE.findall(t)]
-    if len(nums) >= 2:
-        return [(min(nums), max(nums))]
-    if len(nums) == 1:
-        return [(nums[0], nums[0])]
-    return []
+    for part in parts:
+        if part.startswith("(") and part.endswith(")"):
+            cluster_id = part[1:-1]
+            open_mentions[cluster_id].append((token_index, token_index))
 
-def safe_text(x: Optional[str]) -> str:
-    return (x or "").strip()
+        elif part.startswith("("):
+            cluster_id = part[1:]
+            open_mentions[cluster_id].append((token_index, None))
 
-#extração de tokens/sentenças
-def extract_sentences_tokens(root: ET.Element) -> Tuple[List[List[str]], Dict[str, int]]:
-    sentences: List[List[str]] = []
-    token_id_to_idx: Dict[str, int] = {}
+        elif part.endswith(")"):
+            cluster_id = part[:-1]
+            for i in range(len(open_mentions[cluster_id]) - 1, -1, -1):
+                start, end = open_mentions[cluster_id][i]
+                if end is None:
+                    open_mentions[cluster_id][i] = (start, token_index)
+                    break
 
-    global_idx = 0
-    auto_id = 1
 
-    #tenta achar sentenças
-    sent_nodes = root.findall(".//s")
-    if not sent_nodes:
-        sent_nodes = root.findall(".//sentence")
-    #se não achar, trata documento como uma sentença
-    if not sent_nodes:
-        sent_nodes = [root]
+def convert_semeval_to_jsonlines(input_path, output_path):
+    documents = []
+    current_tokens = []
+    current_clusters = defaultdict(list)
+    open_mentions = defaultdict(list)
+    token_index = 0
 
-    for s in sent_nodes:
-        toks: List[str] = []
-        #tokens: <w> ou <token>
-        tok_nodes = s.findall(".//w")
-        if not tok_nodes:
-            tok_nodes = s.findall(".//token")
+    with open(input_path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            line = line.strip()
 
-        for w in tok_nodes:
-            tok = safe_text(w.text)
-            if tok == "":
-                #pq token pode estar guardado em atributo
-                tok = safe_text(w.get("form") or w.get("tok") or w.get("word"))
-            if tok == "":
+            if not line:
                 continue
 
-            tid = w.get("id")
-            if not tid:
-                #garantia: caso vier como "w12"
-                tid = w.get("xml:id") or f"t{auto_id}"
-                auto_id += 1
+            if line.startswith("#begin document"):
+                if current_tokens:
+                    clusters = []
+                    for cluster_id, mentions in open_mentions.items():
+                        spans = []
+                        for start, end in mentions:
+                            if end is not None:
+                                spans.append([start, end])
+                        if spans:
+                            clusters.append(spans)
 
-            toks.append(tok)
-            token_id_to_idx[tid] = global_idx
-            global_idx += 1
+                    documents.append({
+                        "doc_key": f"doc_{len(documents)}",
+                        "tokens": current_tokens,
+                        "clusters": clusters
+                    })
 
-        if toks:
-            sentences.append(toks)
-
-    return sentences, token_id_to_idx
-
-#extração de clusters: (a partir de diferentes estruturas) e retornando clusters_map
-def try_extract_mentions_from_chains(root: ET.Element, token_id_to_idx: Dict[str, int]) -> Dict[str, List[List[int]]]:
-    clusters: Dict[str, List[List[int]]] = {}
-
-    # candidatos de nós de "cadeia"
-    chain_nodes = []
-    for tag in ["entity", "chain", "corefChain", "coref_chain", "markable_set"]:
-        chain_nodes.extend(root.findall(f".//{tag}"))
-
-    def add_span(cid: str, start: int, end: int):
-        clusters.setdefault(cid, []).append([start, end])
-
-    for ch in chain_nodes:
-        cid = ch.get("id") or ch.get("cid") or ch.get("entity") or ch.get("chain_id")
-        if not cid:
-            continue
-        # menções
-        mention_nodes = []
-        for mtag in ["mention", "markable", "span", "m"]:
-            mention_nodes.extend(ch.findall(f".//{mtag}"))
-
-        for m in mention_nodes:
-            # casos comuns: start/end, from/to
-            start_attr = m.get("start") or m.get("from")
-            end_attr = m.get("end") or m.get("to")
-
-            if start_attr and end_attr:
-                # podem ser ids de tokens ("w12") ou números
-                if start_attr in token_id_to_idx:
-                    start = token_id_to_idx[start_attr]
-                else:
-                    start = int(INT_RE.findall(start_attr)[-1])
-
-                if end_attr in token_id_to_idx:
-                    end = token_id_to_idx[end_attr]
-                else:
-                    end = int(INT_RE.findall(end_attr)[-1])
-
-                if start <= end:
-                    add_span(cid, start, end)
-                else:
-                    add_span(cid, end, start)
+                current_tokens = []
+                current_clusters = defaultdict(list)
+                open_mentions = defaultdict(list)
+                token_index = 0
                 continue
 
-            # span em texto/atributo
-            span_attr = m.get("span") or m.get("target") or m.get("tokens")
-            if span_attr:
-                spans = parse_span_text(span_attr)
-                for a,b in spans:
-                    add_span(cid, a, b)
+            if line.startswith("#"):
                 continue
 
-            #se o span vier no texto do nó
-            spans = parse_span_text(safe_text(m.text))
-            for a,b in spans:
-                add_span(cid, a, b)
-
-    return clusters
-
-#para converter 1 xml em 1 objeto no formato {doc_key, sentences, speakers, clusters}:
-def convert_one_xml(xml_path: Path) -> Optional[dict]:
-    try:
-        tree = ET.parse(xml_path)
-        root = tree.getroot()
-    except Exception as e:
-        print(f"!!Falha parse XML {xml_path}: {e}")
-        return None
-
-    doc_key = xml_path.stem
-
-    sentences, token_id_to_idx = extract_sentences_tokens(root)
-    
-    clusters_map = try_extract_mentions_from_chains(root, token_id_to_idx)
-
-    # se não achou nada, devolve doc
-    obj = {
-        "doc_key": doc_key,
-        "sentences": sentences,
-        "speakers": [["-"] * len(s) for s in sentences],
-        "clusters": list(clusters_map.values()),
-    }
-    return obj
-
-def convert(input_dir: Path, output_dir: Path, split_name: str = "all"):
-    output_dir.mkdir(parents=True, exist_ok=True)
-    out_path = output_dir / f"{split_name}.jsonlines"
-
-    n_docs = 0
-    n_with_clusters = 0
-
-    with out_path.open("w", encoding="utf-8") as out:
-        for xml_path in sorted(input_dir.rglob("*.xml")):
-            obj = convert_one_xml(xml_path)
-            if obj is None:
+            parts = line.split()
+            if len(parts) < 2:
                 continue
 
-            # filtra docs vazios total
-            if not obj["sentences"]:
-                continue
+            token = parts[1]
+            coref = parts[-1]
 
-            out.write(json.dumps(obj, ensure_ascii=False) + "\n")
-            n_docs += 1
-            if obj["clusters"]:
-                n_with_clusters += 1
+            current_tokens.append(token)
+            parse_coref_column(coref, token_index, open_mentions)
+            token_index += 1
 
-    print(f"{n_docs} docs → {out_path}")
-    print(f"docs com clusters: {n_with_clusters}/{n_docs}")
+    # salvar último documento
+    if current_tokens:
+        clusters = []
+        for cluster_id, mentions in open_mentions.items():
+            spans = []
+            for start, end in mentions:
+                if end is not None:
+                    spans.append([start, end])
+            if spans:
+                clusters.append(spans)
+
+        documents.append({
+            "doc_key": f"doc_{len(documents)}",
+            "sentences": [current_tokens],
+            "clusters": clusters
+        })
+
+    with open(output_path, "w", encoding="utf-8") as out:
+        for doc in documents:
+            out.write(json.dumps(doc, ensure_ascii=False) + "\n")
+
+    print(f"{len(documents)} docs salvos em {output_path}")
+
 
 if __name__ == "__main__":
-    import argparse
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--input_dir", required=True, help="Pasta com XMLs do CorefPT")
-    ap.add_argument("--output_dir", required=True, help="Pasta de saída")
-    ap.add_argument("--split_name", default="all", help="Nome do arquivo de saída (ex: train/dev/test/all)")
-    args = ap.parse_args()
-    convert(Path(args.input_dir), Path(args.output_dir), split_name=args.split_name)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input_dir", required=True)
+    parser.add_argument("--output_dir", required=True)
+    parser.add_argument("--split_name", required=True)
+    args = parser.parse_args()
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    input_file = os.path.join(args.input_dir, "Corref-PT-SemEval.txt")
+    output_file = os.path.join(args.output_dir, f"{args.split_name}.jsonlines")
+
+    convert_semeval_to_jsonlines(input_file, output_file)
