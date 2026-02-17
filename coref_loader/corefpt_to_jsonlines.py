@@ -55,7 +55,7 @@ def convert_semeval_to_jsonlines(input_path, output_path):
 
                     documents.append({
                         "doc_key": f"doc_{len(documents)}",
-                        "tokens": current_tokens,
+                        "sentences": [current_tokens],
                         "clusters": clusters
                     })
 
@@ -116,3 +116,4 @@ if __name__ == "__main__":
     output_file = os.path.join(args.output_dir, f"{args.split_name}.jsonlines")
 
     convert_semeval_to_jsonlines(input_file, output_file)
+
