@@ -27,7 +27,7 @@ class CorefDataset: ## lê arqs jsonlines do ontonotes. cada linha: {"doc_key", 
         self.samples: List[Dict[str, Any]] = self._load_jsonlines() #chama o load_jsonlines e guarda o resultado em self.samples
 
     def _load_jsonlines(self) -> List[Dict[str, Any]]: #abrir e ler o arquivo
-        path = self.data_dir / f"{self.split}.english.jsonlines" #montando o caminho
+        path = self.data_dir / f"{self.split}.jsonlines" #montando o caminho
         if not path.exists():
             raise FileNotFoundError(f"Não encontrei: {path}")
         docs = [] #preparando lista vazia para juntar os docs
