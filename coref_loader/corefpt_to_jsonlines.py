@@ -5,14 +5,6 @@ from collections import defaultdict
 
 
 def parse_coref_column(coref_str, token_index, open_mentions):
-    """
-    Interpreta coluna de coref estilo SemEval.
-    Exemplos:
-        (1
-        1)
-        (2)
-        -
-    """
     if coref_str == "-" or coref_str == "_":
         return
 
