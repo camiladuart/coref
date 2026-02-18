@@ -221,7 +221,7 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
             is_split_into_words=True,
             add_special_tokens=False,
             truncation=True,          # truncagem agora é por segmento (até 512 WPs), não no doc inteiro
-            max_length=512,           # limite do BERT
+            max_length=self.config.get("max_seq_length", 512),           # limite do BERT - ajustei o parametro no maintrainer
             return_tensors="pt"
         )
         input_ids = enc["input_ids"]

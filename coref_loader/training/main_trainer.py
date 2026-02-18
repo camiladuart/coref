@@ -3,7 +3,6 @@ import torch
 import json
 from pathlib import Path
 from transformers import AutoTokenizer
-from torch.utils.data import DataLoader
 from coref_loader.data import CorefDataset, extract_gold_spans_with_clusters
 from coref_loader.training.model import CorefModel
 from tqdm import tqdm
@@ -151,7 +150,7 @@ def main():
 
     # Training arguments
     ap.add_argument("--epochs", type=int, default=20, help="Número de épocas")
-    ap.add_argument("--lr", type=float, default=2e-5, help="Learning rate")
+    ap.add_argument("--max_seq_length", type=int, default=512, choices=[128,256,384,512], help="Max WordPieces por segmento (Seguindo artigo SpanBERT(128/256/384/512)")
     ap.add_argument("--eval_every", type=int, default=1, help="Avaliar a cada N épocas")
     ap.add_argument("--save_dir", type=str, default="checkpoints", help="Diretório para salvar modelos")
     ap.add_argument("--resume_from", type=str, default=None, help="Checkpoint para continuar treinamento")
@@ -160,11 +159,16 @@ def main():
     ap.add_argument("--inspect_idx", type=int, default=0, help="Índice do documento a inspecionar no split.")
     ap.add_argument("--thresh", type=float, default=0.2, help="Threshold para considerar mention.")
     
-    args = ap.parse_args()
+    #depois da analise dos parametros do artigo: learning rate ajustáveis
+    ap.add_argument("--bert_lr", type=float, default=2e-5, help="LR do encoder (SpanBERT: 1e-5 ou 2e-5)")
+    ap.add_argument("--task_lr", type=float, default=1e-4, help="LR das camadas do task (SpanBERT: 1e-4/2e-4/3e-4)")
 
+    args = ap.parse_args()
+    
     # Config
     config = {
         "encoder_name": "bert-base-cased",
+        "max_seq_length": 512,
         "max_span_width": 30,
         "max_segment_len": 3,
         "top_span_ratio": 0.4,
@@ -173,7 +177,8 @@ def main():
         "genres": [],
         "genre_emb_size": 20,
     }
-
+    config["max_seq_length"] = args.max_seq_length
+    
     # Create save directory
     save_dir = Path(args.save_dir)
     save_dir.mkdir(exist_ok=True)
@@ -422,7 +427,15 @@ def main():
 
 
     # Optimizer
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    encoder_params = list(model.encoder.parameters())
+    encoder_param_ids = {id(p) for p in encoder_params}
+    task_params = [p for p in model.parameters() if id(p) not in encoder_param_ids]
+    optimizer = torch.optim.AdamW(
+        [
+            {"params": encoder_params, "lr": args.bert_lr},
+            {"params": task_params, "lr": args.task_lr},
+        ]
+    )
 
     # Training loop
     print("\n[Starting training...]")
