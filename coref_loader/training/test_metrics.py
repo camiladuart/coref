@@ -384,61 +384,56 @@ def main():
     ap.add_argument("--save_dir", required=True)
     ap.add_argument("--resume_from", default=None)
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--split", choices=["dev", "test"], default="test")  # <-- novo
     args = ap.parse_args()
-
-    config = {
-        "encoder_name": "bert-base-cased",
-        "max_span_width": 30,
-        "max_segment_len": 3,
-        "top_span_ratio": 0.4,
-        "max_top_antecedents": 50,
-        "use_genre": True,
-        "genres": [],
-        "genre_emb_size": 20,
-    }
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("CUDA?", torch.cuda.is_available(), "| device:", device)
 
-    #TEST
-    test_ds = CorefDataset(args.data_dir, "test", config)
-    print(f"[OK] test docs: {len(test_ds)}")
-
-    #detectar gêneros
-    if config.get("use_genre", False):
-        all_genres = sorted({ex.get("genre") for ex in test_ds.samples if ex.get("genre")})
-        config["genres"] = all_genres
-        print(f"[OK] genres: {len(all_genres)}")
-
-    #tokenizer + model
-    tokenizer = AutoTokenizer.from_pretrained(config["encoder_name"])
-    model = CorefModel(config).to(device)
-
-    #TEST: evaluate best checkpoint
+    # Se não passar resume_from, usa best_epoch.txt dentro do save_dir
     if not args.resume_from:
         best_path = Path(args.save_dir) / "best_epoch.txt"
         if not best_path.exists():
             raise FileNotFoundError(
                 f"Não encontrado {best_path}. Rode primeiro o DEV para gerar best_epoch.txt."
             )
-
         best_epoch = int(best_path.read_text().strip())
         args.resume_from = str(Path(args.save_dir) / f"checkpoint_epoch_{best_epoch}.pt")
-        print(f"[TEST] Auto resume_from = {args.resume_from}")
+        print(f"[AUTO] resume_from = {args.resume_from}")
 
-    checkpoint = torch.load(args.resume_from, map_location=device)
+    # Carrega checkpoint primeiro para pegar o config real do treino
+    checkpoint = torch.load(args.resume_from, map_location="cpu")
+    if "config" not in checkpoint:
+        raise KeyError("Checkpoint não tem 'config'. Re-treine com código que salva config no checkpoint.")
+    config = checkpoint["config"]
+
+    # Dataset do split escolhido
+    ds = CorefDataset(args.data_dir, args.split, config)
+    print(f"[OK] {args.split} docs: {len(ds)}")
+
+    # Detectar gêneros com base no dataset (se ativado no config)
+    if config.get("use_genre", False):
+        all_genres = sorted({ex.get('genre') for ex in ds.samples if ex.get('genre')})
+        config["genres"] = all_genres
+        print(f"[OK] genres: {len(all_genres)}")
+
+    # Tokenizer + model
+    tokenizer = AutoTokenizer.from_pretrained(config["encoder_name"])
+    model = CorefModel(config).to(device)
+
+    # Carregar pesos
     model.load_state_dict(checkpoint["model_state_dict"])
-    print(f"[TEST] Loaded checkpoint: {args.resume_from}")
+    print(f"[OK] Loaded checkpoint: {args.resume_from}")
 
     muc, b3, ceaf = evaluate_test_metrics(
-        model, test_ds, tokenizer, config, device, limit=args.limit
+        model, ds, tokenizer, config, device, limit=args.limit
     )
 
-    print("\nTEST METRICS:")
-    print(f"MUC   F1:  {muc:.4f}")
-    print(f"B³    F1:  {b3:.4f}")
-    print(f"CEAF-e F1: {ceaf:.4f}")
-    print("\n")
+    print(f"\n{args.split.upper()} METRICS:")
+    print(f"MUC    F1: {muc:.4f}")
+    print(f"B³     F1: {b3:.4f}")
+    print(f"CEAF-e F1: {ceaf:.4f}\n")
+
 
 if __name__ == "__main__":
     main()
