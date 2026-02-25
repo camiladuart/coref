@@ -12,6 +12,10 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         #bert_config -> alterei para Transformers. Encoder BERT:
         self.encoder = AutoModel.from_pretrained(config["encoder_name"]) # carrega modelo pronto (bert-base-cased)
         hidden_size = self.encoder.config.hidden_size  #guarda o tamanho dos vetores - 768
+        self.head_attention = nn.Linear(hidden_size, 1)
+        self.max_span_width = self.config.get("max_span_width", 30) #largura max
+        self.span_width_emb_size = self.config.get("span_width_emb_size", 20) #dim do vetor de largura
+        self.span_width_embeddings = nn.Embedding(self.max_span_width, self.span_width_emb_size) #cada largura vira um vetor
         
         # gêneros:
         self.use_genre = config.get("use_genre", False) #le do config
@@ -22,9 +26,9 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
                 num_embeddings=len(self.genres), #quantos generos
                 embedding_dim=config["genre_emb_size"], #tamanho do vetor de cada genero
             )
-        # span_emb = [start ; end] (+ opcionalmente gênero)
-        span_emb_size = hidden_size * 2
-        if self.use_genre: #concatenar o genero
+        # span_emb = [start ; end ; head_attention]+width emb (+ opcionalmente gênero)
+        span_emb_size = hidden_size * 3 + self.span_width_emb_size
+        if self.use_genre:
             span_emb_size += config["genre_emb_size"]
             
         self.use_segment_distance = True
@@ -56,6 +60,39 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         )
         self.last_pair_scores = None #guarda o último resultado de pares (visualização)
 
+    #Head attention
+    def compute_head_vecs(
+        self,
+        token_emb: torch.Tensor,
+        span_starts: torch.LongTensor,
+        span_ends: torch.LongTensor,
+        span_batch_idx: torch.LongTensor,
+    ) -> torch.Tensor:
+
+        #1. determinar maximum span width 
+        max_span_width = self.max_span_width
+        #2. num de candidate spans
+        num_spans = span_starts.size(0)
+        #3. construir matriz de token indices para cada span
+        offsets = torch.arange(max_span_width, device=span_starts.device).unsqueeze(0)  
+        span_indices = span_starts.unsqueeze(1) + offsets  
+        #4.evitar indexing errors:
+        T_wp = token_emb.size(1)
+        span_indices_clamped = span_indices.clamp(0, T_wp - 1)
+        #5.juntar token embeddings para cada posiçao
+        span_token_embs = token_emb[span_batch_idx.unsqueeze(1).expand_as(span_indices_clamped), span_indices_clamped]
+        #6.criando mask: True para posicoes dentro do span, false para padding:
+        span_mask = span_indices <= span_ends.unsqueeze(1) 
+        #7.raw attention scores
+        raw_scores = self.head_attention(span_token_embs).squeeze(-1) 
+        #8.usando mask:
+        raw_scores = raw_scores.masked_fill(~span_mask, -1e9)
+        #9.softmax para pegar attention weights (cada coluna vai somar 1 nas posicoes validas)
+        attn_weights = torch.softmax(raw_scores, dim=-1) 
+        #10.calculo final: weighted sum:
+        head_vecs = (attn_weights.unsqueeze(-1) * span_token_embs).sum(dim=1)
+
+        return head_vecs
 
     def _forward_wp(
         self,
@@ -90,12 +127,23 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
                 )
 
         
-        #pegar vetor do token inicial e final 
+        #pegar vetor do token inicial e final + head attention
         start_vecs = token_emb[span_batch_idx, span_starts] 
-        end_vecs   = token_emb[span_batch_idx, span_ends]   
-        #juntar os dois vetores em um só
-        span_emb = torch.cat([start_vecs, end_vecs], dim=-1) 
-
+        end_vecs   = token_emb[span_batch_idx, span_ends] 
+        # width = número de tokens no span (inclui start e end)
+        span_widths = span_ends - span_starts + 1                      
+        span_widths = span_widths.clamp(1, self.max_span_width) #impede 0 e larguras acima do max
+        span_width_ids = span_widths - 1                              
+        width_vecs = self.span_width_embeddings(span_width_ids)        
+        #chamo head attention:
+        head_vecs = self.compute_head_vecs(
+            token_emb=token_emb,
+            span_starts=span_starts,
+            span_ends=span_ends,
+            span_batch_idx=span_batch_idx,
+        )
+        span_emb = torch.cat([start_vecs, end_vecs, head_vecs, width_vecs], dim=-1)  
+        
         if self.use_genre:
             genre_feat = genre_emb.unsqueeze(0).expand(span_emb.size(0), -1) #replica o vetor do genero para todos os spans-todos pertencem ao mesmo doc
             span_emb = torch.cat([span_emb, genre_feat], dim=-1) #concatena ao embedding do span
@@ -130,6 +178,7 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         span_emb = span_emb[top_indices]
         span_starts = span_starts[top_indices]
         span_ends = span_ends[top_indices]
+        mention_scores = mention_scores[top_indices]
         
         if span_starts_tok is not None and span_ends_tok is not None:
             span_starts_tok = span_starts_tok[top_indices]
@@ -143,7 +192,7 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
             candidate_cluster_ids = candidate_cluster_ids[top_indices]
         
         span_segment_ids = span_segment_ids[top_indices]
-        self.last_pair_scores = self.score_span_pairs(span_emb, span_segment_ids)
+        self.last_pair_scores = self.score_span_pairs(span_emb, span_segment_ids, mention_scores)
 
         if return_debug:
             self.last_debug = {
@@ -380,7 +429,7 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         return self.mention_scorer(span_emb).squeeze(-1)
     
     #calcular scores de relação entre pares de spans:
-    def score_span_pairs(self, span_emb: torch.Tensor, span_segment_ids: torch.LongTensor) -> torch.Tensor:
+    def score_span_pairs(self, span_emb, span_segment_ids, mention_scores):
         N, D = span_emb.size()
         device = span_emb.device
         dtype = span_emb.dtype
@@ -408,7 +457,8 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
             pair_feats.append(seg_emb)
 
             pair_input = torch.cat(pair_feats, dim=-1)            
-            scores = self.pair_scorer(pair_input).squeeze(-1)     
+            pairwise = self.pair_scorer(pair_input).squeeze(-1)     
+            scores = pairwise + mention_scores[i] + mention_scores[:i] #score do span atual i e scores dos antecedentes
 
             # completa a linha com -1e9 para j >= i
             pad = neg_inf.expand(N - i)
@@ -449,8 +499,8 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
 
         return cluster_ids
     
-    #helper para transformar cluster_ids em matriz de rótulos e calcular loss:
-    def coref_pair_loss(
+    #helper para transformar cluster_ids em matriz de rótulos e calcular loss ANTIGA - nao uso mais! -> substitui por coref_marginal_loss_with_dummy!!
+    '''def coref_pair_loss(
         self,
         pair_scores: torch.Tensor,         
         candidate_cluster_ids: torch.Tensor 
@@ -512,7 +562,7 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         loss = torch.nn.functional.binary_cross_entropy_with_logits(
             valid_scores, valid_labels
         )
-        return loss
+        return loss '''
     
     def get_genre_embedding(self, genre, device, dtype): #genero para embedding
         if not self.use_genre or genre is None:
