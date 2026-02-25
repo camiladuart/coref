@@ -11,6 +11,10 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
        
         #bert_config -> alterei para Transformers. Encoder BERT:
         self.encoder = AutoModel.from_pretrained(config["encoder_name"]) # carrega modelo pronto (bert-base-cased)
+        #add droupout: 
+        self.dropout_rate = self.config.get("dropout_rate", 0.3)
+        self.dropout = nn.Dropout(self.dropout_rate)
+        
         hidden_size = self.encoder.config.hidden_size  #guarda o tamanho dos vetores - 768
         self.head_attention = nn.Linear(hidden_size, 1)
         self.max_span_width = self.config.get("max_span_width", 30) #largura max
@@ -40,23 +44,33 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
                 span_emb_size
             )
 
-        
-        #projeção linear:
-        self.span_projection = nn.Linear(span_emb_size, span_emb_size)
-            #pega o vetor [start ; end] e aplica W*x + b (mantenho dimensão)
-        
-        self.mention_scorer = nn.Linear(span_emb_size, 1) #cria uma camada linear que recebe o vetor e devolve 1 numero só -> score 
-            #score = quanto o modelo acha que aquele span é uma menção (numero alto = sim, baixo = não)
+        #score = quanto o modelo acha que aquele span é uma menção (numero alto = sim, baixo = não)
+        #Deepen mention scorer para FFNN com 2 hidden layers + dropout
+        ffnn_size = self.config.get("ffnn_size", span_emb_size)
+        self.mention_scorer = nn.Sequential(
+            nn.Linear(span_emb_size, ffnn_size),
+            nn.ReLU(),
+            nn.Dropout(self.dropout_rate),
+            nn.Linear(ffnn_size, ffnn_size),
+            nn.ReLU(),
+            nn.Dropout(self.dropout_rate),
+            nn.Linear(ffnn_size, 1),
+        )
 
         # MLP para comparar pares de spans:
         #para cada par (i,j): [span_i ; span_j ; span_i * span_j]  ->  (3 * span_emb_size)
         pair_input_size = span_emb_size * 3
         if self.use_segment_distance:
             pair_input_size += span_emb_size
+        pair_ffnn_size = self.config.get("pair_ffnn_size", span_emb_size)
         self.pair_scorer = nn.Sequential(
-            nn.Linear(pair_input_size, span_emb_size),
+            nn.Linear(pair_input_size, pair_ffnn_size),
             nn.ReLU(),
-            nn.Linear(span_emb_size, 1)  #devolve 1 score p par
+            nn.Dropout(self.dropout_rate),
+            nn.Linear(pair_ffnn_size, pair_ffnn_size),
+            nn.ReLU(),
+            nn.Dropout(self.dropout_rate),
+            nn.Linear(pair_ffnn_size, 1),
         )
         self.last_pair_scores = None #guarda o último resultado de pares (visualização)
 
@@ -113,6 +127,7 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         #pegar spans dos embeddings:
         outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask) #transformação token -> embedding
         token_emb = outputs.last_hidden_state  #pegar os embeddings de cada token
+        token_emb = self.dropout(token_emb)
         
         # gênero
         genre_emb = None
@@ -148,12 +163,11 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
             genre_feat = genre_emb.unsqueeze(0).expand(span_emb.size(0), -1) #replica o vetor do genero para todos os spans-todos pertencem ao mesmo doc
             span_emb = torch.cat([span_emb, genre_feat], dim=-1) #concatena ao embedding do span
 
-        #proj linear:
-        span_proj = self.span_projection(span_emb) 
-
+        span_emb = self.dropout(span_emb)
+        
         #beam:
         #scores de menção para todos os spans
-        mention_scores = self.get_mention_scores(span_proj)
+        mention_scores = self.get_mention_scores(span_emb)
         #calculando k 
         num_words = input_ids.size(1) #aproximando pelo nº de tokens
         top_span_ratio = self.config.get("top_span_ratio", 0.4)
@@ -652,4 +666,4 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
             top_scores[i, :ci] = vals
             top_mask[i, :ci] = True
 
-        return top_antecedents, top_mask, top_scores
+        return top_antecedents, top_mask, top_scores    
