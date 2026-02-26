@@ -360,30 +360,31 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
 
         keep_mask = torch.tensor(keep_mask, dtype=torch.bool, device=span_starts.device)
         
-        #rótulos 0/1: se o candidato coincide com algum gold (menção ou não)
+        # Filtrar spans em token space
+        span_starts_tok = span_starts[keep_mask]
+        span_ends_tok = span_ends[keep_mask]
+
         mention_labels = self.get_candidate_labels(
-            span_starts, span_ends,
-            gold_starts, gold_ends
+            span_starts_tok,
+            span_ends_tok,
+            gold_starts,
+            gold_ends
         )
-        #ids de cluster por candidato (0 = não pertence a nenhum cluster)
+
         candidate_cluster_ids = self.get_candidate_cluster_ids(
-            span_starts,     
-            span_ends,       
-            gold_starts,    
-            gold_ends,        
-            gold_cluster_ids  
+            span_starts_tok,
+            span_ends_tok,
+            gold_starts,
+            gold_ends,
+            gold_cluster_ids
         )
 
-
-        # filtra spans em token space e labels/cluster
-        span_starts_tok = span_starts_tok[keep_mask]
-        span_ends_tok   = span_ends_tok[keep_mask]
-        mention_labels  = mention_labels[keep_mask]
-        candidate_cluster_ids = candidate_cluster_ids[keep_mask]
         span_segment_ids = span_segment_ids[keep_mask]
         #substitui os spans por wp space (consertando erro anterior BERT)
-        span_starts = torch.tensor(span_start_wp, dtype=torch.long, device=span_starts.device)
-        span_ends   = torch.tensor(span_end_wp,   dtype=torch.long, device=span_ends.device)
+        span_starts = torch.tensor(span_start_wp, device=input_ids.device)
+        span_ends = torch.tensor(span_end_wp, device=input_ids.device)
+        
+        assert span_starts.size(0) == mention_labels.size(0)
         
         #para todos os tensores que entram em _forward_wp estarem no mesmo device:
         device = next(self.parameters()).device
