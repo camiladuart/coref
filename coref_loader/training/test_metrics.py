@@ -171,6 +171,13 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
             gold_starts_all, gold_ends_all, gold_cluster_ids_all = extract_gold_spans_with_clusters(ex)
             genre = ex.get("genre", None)
 
+            #add memória cross-segment (lembrar+relacionar span seg 1 com 2)
+            memory_span_emb = []
+            memory_mention_scores = []
+            memory_segment_ids = []
+            memory_beam_pred_ids = []
+            memory_beam_sizes = []
+            
             # gold clusters (start,end)
             gold_by_cid = {}
             for s, e, cid in zip(gold_starts_all.tolist(),
@@ -216,6 +223,10 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                 if dbg is None:
                     continue
 
+                curr_span_emb = dbg["span_emb"]
+                curr_mention_scores = dbg["mention_scores"]
+                curr_segment_ids = dbg["span_segment_ids"]
+    
                 # spans do beam (indices em tokens do segmento)
                 starts_seg = dbg["span_starts_tok"].detach().cpu().tolist()
                 ends_seg   = dbg["span_ends_tok"].detach().cpu().tolist()
@@ -236,17 +247,77 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                     print("Exemplo spans (idx, start,end,prob):")
                     for p,i in top[:5]:
                         print(i, starts_seg[i], ends_seg[i], p)
+                        
+                beam_pred_ids = [-1] * len(starts_seg)
+                for i in range(len(starts_seg)):
+                    if i in beam_to_pred:
+                        beam_pred_ids[i] = beam_to_pred[i]
+                
+                # links com cross-segment (antes tava intra-segmentos -ERRO?)
+                curr_beam_size = len(starts_seg)
+                if len(memory_span_emb) > 0:
+                    prev_span_emb = torch.cat(memory_span_emb, dim=0)
+                    prev_segment_ids = torch.cat(memory_segment_ids, dim=0)
+                    prev_mention_scores = torch.cat(memory_mention_scores, dim=0)
 
-                # links:
-                pair = dbg["pair_scores"].detach().cpu().numpy()
-                for i in range(1, len(starts_seg)):
+                    prev_size = prev_span_emb.size(0)
+
+                    all_span_emb = torch.cat([prev_span_emb, curr_span_emb], dim=0)
+                    all_segment_ids = torch.cat([prev_segment_ids, curr_segment_ids], dim=0)
+                    all_mention_scores = torch.cat([prev_mention_scores, curr_mention_scores], dim=0)
+
+                    full_scores = model.score_span_pairs(
+                        all_span_emb,
+                        all_segment_ids,
+                        all_mention_scores
+                    ).detach().cpu().numpy()
+
+                else:
+                    prev_size = 0
+                    full_scores = dbg["pair_scores"].detach().cpu().numpy()
+
+                # agora escolher antecedente para cada span atual
+                for i in range(curr_beam_size):
+
                     if i not in beam_to_pred:
                         continue
-                    row = pair[i][:i]
-                    j = int(row.argmax()) if len(row) > 0 else -1
-                    if j in beam_to_pred and row[j] > 0.5:
-                        pred_links.append((beam_to_pred[i], beam_to_pred[j]))
-                        
+
+                    global_i = prev_size + i
+
+                    if global_i == 0:
+                        continue
+
+                    row = full_scores[global_i][:global_i]
+
+                    if len(row) == 0:
+                        continue
+
+                    best_j = int(row.argmax())
+
+                    if row[best_j] > 0.5:
+                        # se antecedente está em segmento anterior:
+                        if best_j < prev_size:
+                            tmp = best_j
+                            seg_k = 0
+                            # descobrir de qual segmento anterior veio
+                            while tmp >= memory_beam_sizes[seg_k]:
+                                tmp -= memory_beam_sizes[seg_k]
+                                seg_k += 1
+                            prev_local_j = tmp
+                            prev_pred_idx = memory_beam_pred_ids[seg_k][prev_local_j]
+                            if prev_pred_idx != -1:
+                                pred_links.append((beam_to_pred[i], prev_pred_idx))
+                        else:
+                            local_j = best_j - prev_size
+                            if local_j in beam_to_pred:
+                                pred_links.append((beam_to_pred[i], beam_to_pred[local_j]))
+                                
+                memory_span_emb.append(curr_span_emb)
+                memory_mention_scores.append(curr_mention_scores)
+                memory_segment_ids.append(curr_segment_ids)
+                memory_beam_pred_ids.append(beam_pred_ids)
+                memory_beam_sizes.append(len(starts_seg))                
+            
             #debug:
             if doc_i == 0:
                 print("\n===== DEBUG DOC 0 =====")

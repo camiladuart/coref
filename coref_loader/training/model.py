@@ -214,6 +214,9 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
                 "span_starts_tok": span_starts_tok.detach().cpu() if span_starts_tok is not None else None,
                 "span_ends_tok": span_ends_tok.detach().cpu() if span_ends_tok is not None else None,
                 "pair_scores": self.last_pair_scores.detach().cpu(),
+                "span_emb": span_emb.detach(),
+                "mention_scores": mention_scores.detach(),
+                "span_segment_ids": span_segment_ids.detach(),
             }
         else:
             self.last_debug = None
