@@ -283,7 +283,7 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                         prev_scores_cat   = torch.cat(memory_mention_scores, dim=0) 
                         prev_seg_ids_cat  = torch.cat(memory_segment_ids, dim=0)   
 
-                        curr_emb_i = curr_span_emb[i].unsqueeze(0)  
+                        curr_emb_i = curr_span_emb[i].unsqueeze(0).to(prev_span_emb_cat.device)  
                         D = curr_emb_i.size(-1)
                         prev_total = prev_span_emb_cat.size(0)
 
