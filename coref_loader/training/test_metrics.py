@@ -237,7 +237,7 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                 probs = torch.sigmoid(logits).detach().cpu().tolist()
                 beam_to_pred = {}   # índice do beam -> índice em pred_mentions
                 for i, (s, e, p) in enumerate(zip(starts_seg, ends_seg, probs)):
-                    if p >= 0.5:  # threshold de menção
+                    if p >= 0.3:  # threshold de menção alterei de 0.5 - mt alto
                         beam_to_pred[i] = len(pred_mentions)
                         pred_mentions.append((seg_token_offset + s, seg_token_offset + e))
 
@@ -294,7 +294,7 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
 
                     best_j = int(row.argmax())
 
-                    if row[best_j] > 0.5:
+                    if row[best_j] > 0.0:
                         # se antecedente está em segmento anterior:
                         if best_j < prev_size:
                             tmp = best_j

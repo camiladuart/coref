@@ -170,12 +170,15 @@ def main():
         "encoder_name": "bert-base-cased",
         "max_seq_length": 512,
         "max_span_width": 30,
-        "max_segment_len": 3,
+        "max_segment_len": 11,
         "top_span_ratio": 0.4,
         "max_top_antecedents": 50,
         "use_genre": False, #por agora - outros datasets
         "genres": [],
         "genre_emb_size": 20,
+        "dropout_rate": 0.2,
+        "ffnn_size": 1000, #valores menores para controle
+        "pair_ffnn_size": 1000,
     }
     config["max_seq_length"] = args.max_seq_length
     
