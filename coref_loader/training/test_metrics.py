@@ -252,71 +252,83 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                 for i in range(len(starts_seg)):
                     if i in beam_to_pred:
                         beam_pred_ids[i] = beam_to_pred[i]
-                
-                # links com cross-segment (antes tava intra-segmentos -ERRO?)
+
+                # links: para cada span atual que passou o threshold,
+                # escolher melhor antecedente entre (a) spans do seg atual e (b) spans de segs anteriores
                 curr_beam_size = len(starts_seg)
-                if len(memory_span_emb) > 0:
-                    prev_span_emb = torch.cat(memory_span_emb, dim=0)
-                    prev_segment_ids = torch.cat(memory_segment_ids, dim=0)
-                    prev_mention_scores = torch.cat(memory_mention_scores, dim=0)
 
-                    prev_size = prev_span_emb.size(0)
+                # scores intra-segmento já calculados pelo modelo 
+                intra_scores = dbg["pair_scores"].detach().cpu().numpy() 
 
-                    all_span_emb = torch.cat([prev_span_emb, curr_span_emb], dim=0)
-                    all_segment_ids = torch.cat([prev_segment_ids, curr_segment_ids], dim=0)
-                    all_mention_scores = torch.cat([prev_mention_scores, curr_mention_scores], dim=0)
-
-                    full_scores = model.score_span_pairs(
-                        all_span_emb,
-                        all_segment_ids,
-                        all_mention_scores
-                    ).detach().cpu().numpy()
-
-                else:
-                    prev_size = 0
-                    full_scores = dbg["pair_scores"].detach().cpu().numpy()
-
-                # agora escolher antecedente para cada span atual
                 for i in range(curr_beam_size):
-
                     if i not in beam_to_pred:
                         continue
 
-                    global_i = prev_size + i
+                    best_score = 0.0   # threshold: só linka se bater o dummy (score > 0)
+                    best_pred_idx = -1
 
-                    if global_i == 0:
-                        continue
+                    # (a) antecedentes no mesmo segmento (intra)
+                    if i > 0:
+                        row_intra = intra_scores[i][:i]
+                        j_intra = int(row_intra.argmax())
+                        if row_intra[j_intra] > best_score:
+                            if j_intra in beam_to_pred:
+                                best_score = row_intra[j_intra]
+                                best_pred_idx = beam_to_pred[j_intra]
 
-                    row = full_scores[global_i][:global_i]
+                    # (b) antecedentes em segmentos anteriores (cross-segment)
+                    # calcula só as interações: span_i atual vs. todos os spans anteriores
+                    if len(memory_span_emb) > 0:
+                        prev_span_emb_cat = torch.cat(memory_span_emb, dim=0)      
+                        prev_scores_cat   = torch.cat(memory_mention_scores, dim=0) 
+                        prev_seg_ids_cat  = torch.cat(memory_segment_ids, dim=0)   
 
-                    if len(row) == 0:
-                        continue
+                        curr_emb_i = curr_span_emb[i].unsqueeze(0)  
+                        D = curr_emb_i.size(-1)
+                        prev_total = prev_span_emb_cat.size(0)
 
-                    best_j = int(row.argmax())
+                        # broadcasting só para 1 span vs. todos os anteriores 
+                        emb_i_exp = curr_emb_i.expand(prev_total, D)
+                        emb_j_exp = prev_span_emb_cat
 
-                    if row[best_j] > 0.0:
-                        # se antecedente está em segmento anterior:
-                        if best_j < prev_size:
-                            tmp = best_j
+                        # distância de segmento
+                        seg_i_val = curr_segment_ids[i].item()
+                        seg_j_vals = prev_seg_ids_cat
+                        seg_dist = (torch.full_like(seg_j_vals, seg_i_val) - seg_j_vals)
+                        seg_dist = seg_dist.clamp(0, model.max_training_sentences - 1)
+                        seg_emb_cross = model.segment_distance_embeddings(seg_dist) 
+
+                        pair_input_cross = torch.cat(
+                            [emb_i_exp, emb_j_exp, emb_i_exp * emb_j_exp, seg_emb_cross], dim=-1
+                        )  
+
+                        with torch.no_grad():
+                            cross_scores = model.pair_scorer(pair_input_cross).squeeze(-1)  
+                        cross_scores = cross_scores + curr_mention_scores[i] + prev_scores_cat
+                        cross_scores = cross_scores.detach().cpu().numpy()
+
+                        best_j_cross = int(cross_scores.argmax())
+                        if cross_scores[best_j_cross] > best_score:
+                            # mapear best_j_cross -> pred_idx
+                            tmp = best_j_cross
                             seg_k = 0
-                            # descobrir de qual segmento anterior veio
-                            while tmp >= memory_beam_sizes[seg_k]:
+                            while seg_k < len(memory_beam_sizes) and tmp >= memory_beam_sizes[seg_k]:
                                 tmp -= memory_beam_sizes[seg_k]
                                 seg_k += 1
-                            prev_local_j = tmp
-                            prev_pred_idx = memory_beam_pred_ids[seg_k][prev_local_j]
-                            if prev_pred_idx != -1:
-                                pred_links.append((beam_to_pred[i], prev_pred_idx))
-                        else:
-                            local_j = best_j - prev_size
-                            if local_j in beam_to_pred:
-                                pred_links.append((beam_to_pred[i], beam_to_pred[local_j]))
-                                
+                            if seg_k < len(memory_beam_pred_ids):
+                                prev_pred_idx = memory_beam_pred_ids[seg_k][tmp]
+                                if prev_pred_idx != -1:
+                                    best_score = cross_scores[best_j_cross]
+                                    best_pred_idx = prev_pred_idx
+
+                    if best_pred_idx != -1:
+                        pred_links.append((beam_to_pred[i], best_pred_idx))
+
                 memory_span_emb.append(curr_span_emb)
                 memory_mention_scores.append(curr_mention_scores)
                 memory_segment_ids.append(curr_segment_ids)
                 memory_beam_pred_ids.append(beam_pred_ids)
-                memory_beam_sizes.append(len(starts_seg))                
+                memory_beam_sizes.append(curr_beam_size)               
             
             #debug:
             if doc_i == 0:
