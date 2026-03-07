@@ -175,13 +175,13 @@ def main():
         "max_segment_len": 11,
         "top_span_ratio": 0.4,
         "max_top_antecedents": 50,
-        "use_genre": False, #por agora - outros datasets
+        "use_genre": False,
         "genres": [],
         "genre_emb_size": 20,
         "dropout_rate": 0.2,
         "ffnn_size": 1000, #valores menores para controle
         "pair_ffnn_size": 1000,
-        "use_speakers": False,
+        "use_speakers": True,
         "speaker_emb_size": 20, #tamanho do emb de speaker
     }
     config["max_seq_length"] = args.max_seq_length
