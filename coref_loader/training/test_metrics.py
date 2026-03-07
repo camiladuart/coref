@@ -216,6 +216,7 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                     gold_cluster_ids_all=gold_cluster_ids_all,
                     max_span_width=config["max_span_width"],
                     genre=genre,
+                    speakers=ex.get("speakers", None),
                     return_debug=True,
                 )
 

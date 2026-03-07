@@ -45,6 +45,19 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
                 self.seg_dist_emb_size
             )
 
+        #speakers info:
+        self.use_speakers = config.get("use_speakers", False)
+        if self.use_speakers:
+            self.speaker_emb_size = config.get("speaker_emb_size", 20)
+            # 3 casos: mesmo speaker, speakers diferentes, speaker desconhecido
+            self.speaker_embeddings = nn.Embedding(3, self.speaker_emb_size)
+        #ajustando pair_input_size:
+        pair_input_size = span_emb_size * 3
+        if self.use_segment_distance:
+            pair_input_size += self.seg_dist_emb_size
+        if self.use_speakers:
+            pair_input_size += self.speaker_emb_size
+        
         #score = quanto o modelo acha que aquele span é uma menção (numero alto = sim, baixo = não)
         #Deepen mention scorer para FFNN com 2 hidden layers + dropout
         ffnn_size = self.config.get("ffnn_size", span_emb_size)
@@ -58,11 +71,7 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
             nn.Linear(ffnn_size, 1),
         )
 
-        # MLP para comparar pares de spans:
-        #para cada par (i,j): [span_i ; span_j ; span_i * span_j]  ->  (3 * span_emb_size)
-        pair_input_size = span_emb_size * 3
-        if self.use_segment_distance:
-            pair_input_size += self.seg_dist_emb_size
+        #para comparar pares de spans:
         pair_ffnn_size = self.config.get("pair_ffnn_size", span_emb_size)
         self.pair_scorer = nn.Sequential(
             nn.Linear(pair_input_size, pair_ffnn_size),
@@ -73,7 +82,7 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
             nn.Dropout(self.dropout_rate),
             nn.Linear(pair_ffnn_size, 1),
         )
-        self.last_pair_scores = None #guarda o último resultado de pares (visualização)
+        self.last_pair_scores = None #guarda o último resultado de pares 
 
     #Head attention
     def compute_head_vecs(
@@ -122,6 +131,7 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         genre=None,
         span_starts_tok=None, 
         span_ends_tok=None,
+        speaker_ids=None,
         return_debug: bool = False, 
     ) -> torch.Tensor:                    
 
@@ -207,7 +217,15 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
             candidate_cluster_ids = candidate_cluster_ids[top_indices]
         
         span_segment_ids = span_segment_ids[top_indices]
-        self.last_pair_scores = self.score_span_pairs(span_emb, span_segment_ids, mention_scores)
+        #filtrando speaker_ids com o beam
+        beam_speaker_ids = None
+        if speaker_ids is not None:
+            beam_speaker_ids = speaker_ids[top_indices]
+            
+        self.last_pair_scores = self.score_span_pairs(
+            span_emb, span_segment_ids, mention_scores,
+            speaker_ids=beam_speaker_ids
+        )
 
         if return_debug:
             self.last_debug = {
@@ -265,6 +283,7 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         gold_cluster_ids_all,
         max_span_width: int = 30,
         genre=None,
+        speakers=None,
         span_segment_ids=None, return_debug: bool = False
     ):  
     # juntar sentenças e construir sentence_map
@@ -381,6 +400,29 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         
         assert span_starts.size(0) == mention_labels.size(0)
         
+        #construindo speaker_ids por span candidato (speaker do token inicial de cada span)
+        speaker_ids_tensor = None
+        if self.use_speakers and speakers is not None:
+            #achatando os speakers das sentenças numa lista plana por token
+            seg_speaker_flat = [
+                spk
+                for sent_idx, sent_spk in enumerate(speakers)
+                if seg_start <= sent_idx < seg_start + len(seg_sents)
+                for spk in sent_spk
+            ]
+            #vocab de speakers (string -> id numérico)
+            unique_spk = list(dict.fromkeys(seg_speaker_flat))  #preserva ordem, sem repetição
+            spk_to_id = {s: i for i, s in enumerate(unique_spk)}
+
+            #para cada span candidato filtrado (em token space), pegar o speaker do token inicial
+            raw_ids = []
+            for s in span_starts_tok.tolist():  
+                if 0 <= s < len(seg_speaker_flat):
+                    raw_ids.append(spk_to_id.get(seg_speaker_flat[s], -1))
+                else:
+                    raw_ids.append(-1)  
+            speaker_ids_tensor = torch.tensor(raw_ids, dtype=torch.long)
+    
         #para todos os tensores que entram em _forward_wp estarem no mesmo device:
         device = next(self.parameters()).device
         span_starts = span_starts.to(device)
@@ -406,6 +448,7 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
             span_segment_ids=span_segment_ids,
             span_starts_tok=span_starts_tok.to(device),
             span_ends_tok=span_ends_tok.to(device),
+            speaker_ids=speaker_ids_tensor.to(device) if speaker_ids_tensor is not None else None,
             return_debug=return_debug,
         )
 
@@ -439,7 +482,7 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         return self.mention_scorer(span_emb).squeeze(-1)
     
     #calcular scores de relação entre pares de spans:
-    def score_span_pairs(self, span_emb, span_segment_ids, mention_scores):
+    def score_span_pairs(self, span_emb, span_segment_ids, mention_scores, speaker_ids=None):
         N, D = span_emb.size()
         device = span_emb.device
         dtype = span_emb.dtype
@@ -454,8 +497,21 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         seg_dist = (seg_i - seg_j).clamp(0, self.max_training_sentences - 1)  
         seg_emb = self.segment_distance_embeddings(seg_dist) 
 
-        pair_input = torch.cat([emb_i, emb_j, emb_i * emb_j, seg_emb], dim=-1) ##concatenando features do par
+        pair_feats = [emb_i, emb_j, emb_i * emb_j, seg_emb]
 
+        #add info dos speakers:
+        if self.use_speakers and speaker_ids is not None:
+            spk_i = speaker_ids.unsqueeze(1).expand(N, N)  
+            spk_j = speaker_ids.unsqueeze(0).expand(N, N) 
+            # 0 = mesmo speaker, 1 = diferente, 2 = desconhecido
+            same = (spk_i == spk_j).long()                 # 0 ou 1
+            unknown = ((spk_i < 0) | (spk_j < 0)).long()  # 1 onde desconhecido
+            speaker_label = torch.where(unknown == 1, torch.full_like(same, 2), 1 - same) # 0=mesmo, 1=diferente, 2=desconhecido
+            spk_emb = self.speaker_embeddings(speaker_label) 
+            pair_feats.append(spk_emb)
+
+        pair_input = torch.cat(pair_feats, dim=-1)
+    
         #um único forward pass (mais rapido -> loop anterior mt lento)
         pair_scores = self.pair_scorer(pair_input).squeeze(-1)
 
