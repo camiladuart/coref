@@ -499,15 +499,21 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
 
         pair_feats = [emb_i, emb_j, emb_i * emb_j, seg_emb]
 
-        #add info dos speakers:
-        if self.use_speakers and speaker_ids is not None:
-            spk_i = speaker_ids.unsqueeze(1).expand(N, N)  
-            spk_j = speaker_ids.unsqueeze(0).expand(N, N) 
-            # 0 = mesmo speaker, 1 = diferente, 2 = desconhecido
-            same = (spk_i == spk_j).long()                 # 0 ou 1
-            unknown = ((spk_i < 0) | (spk_j < 0)).long()  # 1 onde desconhecido
-            speaker_label = torch.where(unknown == 1, torch.full_like(same, 2), 1 - same) # 0=mesmo, 1=diferente, 2=desconhecido
-            spk_emb = self.speaker_embeddings(speaker_label) 
+        if self.use_speakers:
+            if speaker_ids is not None:
+                spk_i = speaker_ids.unsqueeze(1).expand(N, N)
+                spk_j = speaker_ids.unsqueeze(0).expand(N, N)
+                same = (spk_i == spk_j).long()
+                unknown = ((spk_i < 0) | (spk_j < 0)).long()
+                speaker_label = torch.where(
+                    unknown == 1,
+                    torch.full_like(same, 2),
+                    1 - same
+                )
+            else:
+                # sem info de speaker: tudo desconhecido
+                speaker_label = torch.full((N, N), 2, dtype=torch.long, device=device)
+            spk_emb = self.speaker_embeddings(speaker_label)
             pair_feats.append(spk_emb)
 
         pair_input = torch.cat(pair_feats, dim=-1)

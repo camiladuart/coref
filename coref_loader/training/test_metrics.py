@@ -299,9 +299,18 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                         seg_dist = seg_dist.clamp(0, model.max_training_sentences - 1)
                         seg_emb_cross = model.segment_distance_embeddings(seg_dist) 
 
-                        pair_input_cross = torch.cat(
-                            [emb_i_exp, emb_j_exp, emb_i_exp * emb_j_exp, seg_emb_cross], dim=-1
-                        )  
+                        cross_feats = [emb_i_exp, emb_j_exp, emb_i_exp * emb_j_exp, seg_emb_cross]
+
+                        if model.use_speakers:
+                            # speaker do span atual vs. todos os anteriores
+                            spk_label = torch.full(
+                                (prev_total,), 2, dtype=torch.long,
+                                device=prev_span_emb_cat.device
+                            )
+                            spk_emb_cross = model.speaker_embeddings(spk_label)  # [prev_total, 20]
+                            cross_feats.append(spk_emb_cross)
+
+                        pair_input_cross = torch.cat(cross_feats, dim=-1)  
 
                         with torch.no_grad():
                             cross_scores = model.pair_scorer(pair_input_cross).squeeze(-1)  

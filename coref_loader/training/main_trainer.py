@@ -175,7 +175,7 @@ def main():
         "max_segment_len": 11,
         "top_span_ratio": 0.4,
         "max_top_antecedents": 50,
-        "use_genre": False,
+        "use_genre": False, 
         "genres": [],
         "genre_emb_size": 20,
         "dropout_rate": 0.2,
