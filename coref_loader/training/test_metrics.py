@@ -1,10 +1,12 @@
 import argparse
 from pathlib import Path
 import torch
+import numpy as np
 from transformers import AutoTokenizer
 from coref_loader.data import CorefDataset, extract_gold_spans_with_clusters
 from coref_loader.training.model import CorefModel
 from coref_loader.training.main_trainer import sentence_chunks
+from scipy.optimize import linear_sum_assignment
 
 #criar mapa - a qual cluster cada span pertence: 
 def _flatten_clusters(clusters):
@@ -77,29 +79,16 @@ def ceaf_e_f1(pred_clusters, gold_clusters):
     if not pred_clusters and not gold_clusters:
         return 0.0
 
-    #similarity matrix (compara cluster pred com cluster gold)
-    sim = []
-    for pc in pred_clusters:
+    #matriz de similaridade:
+    sim = np.zeros((len(pred_clusters), len(gold_clusters)), dtype=np.float64)
+    for i, pc in enumerate(pred_clusters):
         pc_set = set(pc)
-        row = []
-        for gc in gold_clusters:
-            row.append(len(pc_set & set(gc)))
-        sim.append(row)
+        for j, gc in enumerate(gold_clusters):
+            sim[i, j] = len(pc_set & set(gc))
 
-    used_g = set() #clusters gold ja usados
-    total = 0 #soma da similaridade
-    for i in range(len(pred_clusters)): #para cada cluster previsto, escolher o melhor cluster gold:
-        best_j = -1
-        best = -1
-        for j in range(len(gold_clusters)):
-            if j in used_g:
-                continue
-            if sim[i][j] > best:
-                best = sim[i][j]
-                best_j = j
-        if best_j >= 0 and best > 0:
-            used_g.add(best_j)
-            total += best
+    #hungarian matching: linear_sum_assignment minimiza -> negamos para maximizar
+    row_ind, col_ind = linear_sum_assignment(-sim)
+    total = sim[row_ind, col_ind].sum()
 
     pred_denom = sum(len(c) for c in pred_clusters)
     gold_denom = sum(len(c) for c in gold_clusters)
@@ -107,7 +96,6 @@ def ceaf_e_f1(pred_clusters, gold_clusters):
     rec  = total / gold_denom if gold_denom > 0 else 0.0
     f1 = (2*prec*rec/(prec+rec)) if (prec+rec) > 0 else 0.0
     return f1
-
 
 #função union pra agrupar mençoes nos clusters:
 def union_find(n, links):
@@ -149,7 +137,7 @@ def muc_counts(clusters, other_m2c):
 #funçao evaluate:
 def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
     model.eval()
-    # acumuladores globais (eu estava fazendo media por doc -> metricas altas -> alteraçao:)
+    #acumuladores globais (eu estava fazendo media por doc -> metricas altas -> alteraçao:)
     total_muc_tp_p = 0
     total_muc_p = 0
     total_muc_tp_r = 0
@@ -178,7 +166,7 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
             memory_beam_pred_ids = []
             memory_beam_sizes = []
             
-            # gold clusters (start,end)
+            #gold clusters (start,end)
             gold_by_cid = {}
             for s, e, cid in zip(gold_starts_all.tolist(),
                                 gold_ends_all.tolist(),
@@ -188,7 +176,7 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                 gold_by_cid.setdefault(cid, []).append((s, e))
             gold_clusters = list(gold_by_cid.values())
             
-            # achatar gold para set de menções
+            #achatar gold para set de menções
             gold_mentions = [m for cl in gold_clusters for m in cl]
             gold_set = set(gold_mentions)
 
@@ -197,7 +185,7 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                 print("Exemplo gold mentions:", gold_mentions[:20], flush=True)
 
             sent_lens = [len(s) for s in sentences]
-            sent_prefix = [0] # sent_prefix[k] = tokens antes da sentence k
+            sent_prefix = [0] #sent_prefix[k] = tokens antes da sentence k
             for L in sent_lens:
                 sent_prefix.append(sent_prefix[-1] + L)
         
@@ -228,11 +216,11 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                 curr_mention_scores = dbg["mention_scores"]
                 curr_segment_ids = dbg["span_segment_ids"]
     
-                # spans do beam (indices em tokens do segmento)
+                #spans do beam (indices em tokens do segmento)
                 starts_seg = dbg["span_starts_tok"].detach().cpu().tolist()
                 ends_seg   = dbg["span_ends_tok"].detach().cpu().tolist()
 
-                # offset de tokens antes deste segmento no doc
+                #offset de tokens antes deste segmento no doc
                 seg_token_offset = sent_prefix[seg_start]
                 
                 probs = torch.sigmoid(logits).detach().cpu().tolist()
@@ -254,21 +242,20 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                     if i in beam_to_pred:
                         beam_pred_ids[i] = beam_to_pred[i]
 
-                # links: para cada span atual que passou o threshold,
-                # escolher melhor antecedente entre (a) spans do seg atual e (b) spans de segs anteriores
+                #links: para cada span atual que passou o threshold, escolher melhor antecedente entre spans do seg atual e spans de segs anteriores
                 curr_beam_size = len(starts_seg)
 
-                # scores intra-segmento já calculados pelo modelo 
+                #scores intra-segmento já calculados pelo modelo 
                 intra_scores = dbg["pair_scores"].detach().cpu().numpy() 
 
                 for i in range(curr_beam_size):
                     if i not in beam_to_pred:
                         continue
 
-                    best_score = 0.0   # threshold: só linka se bater o dummy (score > 0)
+                    best_score = 0.0   #threshold: só linka se bater o dummy (score > 0)
                     best_pred_idx = -1
 
-                    # (a) antecedentes no mesmo segmento (intra)
+                    #1.antecedentes no mesmo segmento (intra)
                     if i > 0:
                         row_intra = intra_scores[i][:i]
                         j_intra = int(row_intra.argmax())
@@ -277,8 +264,8 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                                 best_score = row_intra[j_intra]
                                 best_pred_idx = beam_to_pred[j_intra]
 
-                    # (b) antecedentes em segmentos anteriores (cross-segment)
-                    # calcula só as interações: span_i atual vs. todos os spans anteriores
+                    #2.antecedentes em segmentos anteriores (cross-segment)
+                    #calcula só as interações: span_i atual vs. todos os spans anteriores
                     if len(memory_span_emb) > 0:
                         prev_span_emb_cat = torch.cat(memory_span_emb, dim=0)      
                         prev_scores_cat   = torch.cat(memory_mention_scores, dim=0) 
@@ -288,11 +275,11 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                         D = curr_emb_i.size(-1)
                         prev_total = prev_span_emb_cat.size(0)
 
-                        # broadcasting só para 1 span vs. todos os anteriores 
+                        #broadcasting só para 1 span vs. todos os anteriores 
                         emb_i_exp = curr_emb_i.expand(prev_total, D)
                         emb_j_exp = prev_span_emb_cat
 
-                        # distância de segmento
+                        #distância de segmento
                         seg_i_val = curr_segment_ids[i].item()
                         seg_j_vals = prev_seg_ids_cat
                         seg_dist = (torch.full_like(seg_j_vals, seg_i_val) - seg_j_vals)
@@ -302,7 +289,7 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                         cross_feats = [emb_i_exp, emb_j_exp, emb_i_exp * emb_j_exp, seg_emb_cross]
 
                         if model.use_speakers:
-                            # speaker do span atual vs. todos os anteriores
+                            #speaker do span atual vs. todos os anteriores
                             spk_label = torch.full(
                                 (prev_total,), 2, dtype=torch.long,
                                 device=prev_span_emb_cat.device
@@ -319,7 +306,7 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
 
                         best_j_cross = int(cross_scores.argmax())
                         if cross_scores[best_j_cross] > best_score:
-                            # mapear best_j_cross -> pred_idx
+                            #mapear best_j_cross -> pred_idx
                             tmp = best_j_cross
                             seg_k = 0
                             while seg_k < len(memory_beam_sizes) and tmp >= memory_beam_sizes[seg_k]:
@@ -429,32 +416,20 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                 total_b3_rec_num += inter
                 total_b3_rec_den += len(g)
 
-            #CEAFe
-            sim = []
-            for pc in pred_clusters:
-                pc_set = set(pc)
-                row = []
-                for gc in gold_clusters:
-                    row.append(len(pc_set & set(gc)))
-                sim.append(row)
-
-            used_g = set()
-            for i in range(len(pred_clusters)):
-                best_j = -1
-                best = -1
-                for j in range(len(gold_clusters)):
-                    if j in used_g:
-                        continue
-                    if sim[i][j] > best:
-                        best = sim[i][j]
-                        best_j = j
-                if best_j >= 0 and best > 0:
-                    used_g.add(best_j)
-                    total_ceaf_sim += best
+            #CEAFe com Hungarian matching
+            if pred_clusters and gold_clusters:
+                import numpy as np
+                sim_mat = np.zeros((len(pred_clusters), len(gold_clusters)), dtype=np.float64)
+                for i, pc in enumerate(pred_clusters):
+                    pc_set = set(pc)
+                    for j, gc in enumerate(gold_clusters):
+                        sim_mat[i, j] = len(pc_set & set(gc))
+                row_ind, col_ind = linear_sum_assignment(-sim_mat)
+                total_ceaf_sim += sim_mat[row_ind, col_ind].sum()
 
             total_ceaf_pred += sum(len(c) for c in pred_clusters)
             total_ceaf_gold += sum(len(c) for c in gold_clusters)
-
+            
     #calculos finais: MUC:
     muc_prec = total_muc_tp_p / total_muc_p if total_muc_p > 0 else 0.0
     muc_rec  = total_muc_tp_r / total_muc_r if total_muc_r > 0 else 0.0

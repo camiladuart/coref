@@ -7,6 +7,7 @@ from coref_loader.data import CorefDataset, extract_gold_spans_with_clusters
 from coref_loader.training.model import CorefModel
 from tqdm import tqdm
 import numpy as np
+from coref_loader.training.test_metrics import evaluate_test_metrics
 
 def sentence_chunks(sentences, max_segment_len):
     for i in range(0, len(sentences), max_segment_len):
@@ -69,7 +70,7 @@ def evaluate(model, dataset, tokenizer, config, device, limit=None):
     return avg_loss, avg_acc
 
 #train for one epoch
-def train_epoch(model, dataset, tokenizer, config, optimizer, device, epoch, limit=None):
+def train_epoch(model, dataset, tokenizer, config, optimizer, device, epoch, scheduler=None, limit=None):
     model.train()
     total_loss = 0.0
     total_acc = 0.0
@@ -129,6 +130,8 @@ def train_epoch(model, dataset, tokenizer, config, optimizer, device, epoch, lim
             doc_total_loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
 
             total_loss += float(doc_total_loss.item())
             total_acc += doc_correct
@@ -164,6 +167,7 @@ def main():
     #depois da analise dos parametros do artigo: learning rate ajustáveis
     ap.add_argument("--bert_lr", type=float, default=2e-5, help="LR do encoder (SpanBERT: 1e-5 ou 2e-5)")
     ap.add_argument("--task_lr", type=float, default=1e-4, help="LR das camadas do task (SpanBERT: 1e-4/2e-4/3e-4)")
+    ap.add_argument("--warmup_ratio", type=float, default=0.1, help="Fração do treino para warmup (default: 10%)") #add learning rate scheduler
 
     args = ap.parse_args()
     
@@ -377,25 +381,24 @@ def main():
             raise FileNotFoundError(f"Nenhum checkpoint_epoch_*.pt em {save_dir}")
 
         best_epoch = None
-        best_loss = float("inf")
-
-        print(f"\n[DEV] Evaluating {len(ckpts)} checkpoints...")
+        best_f1 = -1.0
+        print(f"\n[DEV] Evaluating {len(ckpts)} checkpoints by CoNLL F1")
         for p in ckpts:
             epoch_num = int(p.stem.split("_")[-1])
             ckpt = torch.load(p, map_location=device)
             model.load_state_dict(ckpt["model_state_dict"])
 
-            dev_loss, dev_acc = evaluate(
+            muc, b3, ceaf = evaluate_test_metrics(
                 model, dev_ds, tokenizer, config, device,
                 limit=args.limit if args.limit > 0 else None
             )
-            print(f"[Dev][Epoch {epoch_num}] Loss: {dev_loss:.4f} | Acc: {dev_acc:.3f}")
+            conll_f1 = (muc + b3 + ceaf) / 3.0
+            print(f"[Dev][Epoch {epoch_num}] MUC={muc:.4f} B3={b3:.4f} CEAF={ceaf:.4f} CoNLL={conll_f1:.4f}")
 
-            if dev_loss < best_loss:
-                best_loss = dev_loss
+            if conll_f1 > best_f1:
+                best_f1 = conll_f1
                 best_epoch = epoch_num
-
-        print(f"\n[DEV] Best epoch by dev loss: epoch={best_epoch} dev_loss={best_loss:.4f}")
+        print(f"\n[DEV] Best epoch by CoNLL F1: epoch={best_epoch} conll_f1={best_f1:.4f}")
         print(f"[DEV] Use this checkpoint for TEST:")
         print(f"      {save_dir}/checkpoint_epoch_{best_epoch}.pt")
         best_path = save_dir / "best_epoch.txt"
@@ -439,11 +442,21 @@ def main():
     encoder_param_ids = {id(p) for p in encoder_params}
     task_params = [p for p in model.parameters() if id(p) not in encoder_param_ids]
     optimizer = torch.optim.AdamW(
-        [
-            {"params": encoder_params, "lr": args.bert_lr},
-            {"params": task_params, "lr": args.task_lr},
-        ]
+    [
+        {"params": encoder_params, "lr": args.bert_lr},
+        {"params": task_params, "lr": args.task_lr},
+    ]
     )
+    #learning rate scheduler: warmup linear + decay linear até zero
+    total_steps = args.epochs * len(train_ds)  # 1 step por documento
+    warmup_steps = int(total_steps * args.warmup_ratio)
+    from transformers import get_linear_schedule_with_warmup
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=warmup_steps,
+        num_training_steps=total_steps,
+    )
+    print(f"[Scheduler] total_steps={total_steps} warmup_steps={warmup_steps}")
 
     # Training loop
     print("\n[Starting training...]")
@@ -454,8 +467,9 @@ def main():
         
         # Train
         train_loss, train_acc = train_epoch(
-            model, train_ds, tokenizer, config, optimizer, device, 
-            epoch+1, limit=args.limit if args.limit > 0 else None
+            model, train_ds, tokenizer, config, optimizer, device,
+            epoch+1, scheduler=scheduler,
+            limit=args.limit if args.limit > 0 else None
         )
         print(f"\n[Train] Loss: {train_loss:.4f} | Acc: {train_acc:.3f}")
         if (epoch + 1) % args.eval_every == 0:
@@ -471,6 +485,7 @@ def main():
             'epoch': epoch + 1,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
             'train_loss': train_loss,
             'config': config,
         }, checkpoint_path)
