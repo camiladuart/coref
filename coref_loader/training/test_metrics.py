@@ -5,7 +5,7 @@ import numpy as np
 from transformers import AutoTokenizer
 from coref_loader.data import CorefDataset, extract_gold_spans_with_clusters
 from coref_loader.training.model import CorefModel
-from coref_loader.training.main_trainer import sentence_chunks
+from coref_loader.data import sentence_chunks
 from scipy.optimize import linear_sum_assignment
 
 #criar mapa - a qual cluster cada span pertence: 

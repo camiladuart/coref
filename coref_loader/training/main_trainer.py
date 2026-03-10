@@ -7,7 +7,6 @@ from coref_loader.data import CorefDataset, extract_gold_spans_with_clusters
 from coref_loader.training.model import CorefModel
 from tqdm import tqdm
 import numpy as np
-from coref_loader.training.test_metrics import evaluate_test_metrics
 
 def sentence_chunks(sentences, max_segment_len):
     for i in range(0, len(sentences), max_segment_len):
@@ -383,6 +382,7 @@ def main():
         best_epoch = None
         best_f1 = -1.0
         print(f"\n[DEV] Evaluating {len(ckpts)} checkpoints by CoNLL F1")
+        from coref_loader.training.test_metrics import evaluate_test_metrics
         for p in ckpts:
             epoch_num = int(p.stem.split("_")[-1])
             ckpt = torch.load(p, map_location=device)
