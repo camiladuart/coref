@@ -115,3 +115,7 @@ def extract_gold_spans_with_clusters(example):
         torch.tensor(ends, dtype=torch.long),
         torch.tensor(gold_cluster_ids, dtype=torch.long),
     ) #convertendo tudo para tensores
+
+def sentence_chunks(sentences, max_segment_len):
+    for i in range(0, len(sentences), max_segment_len):
+        yield i, sentences[i : i + max_segment_len]
