@@ -594,8 +594,8 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         # gold: antecedentes do top-c que têm o mesmo cluster_id
         cid_i = candidate_cluster_ids.unsqueeze(1)       
         cid_j = candidate_cluster_ids[top_idx]
-        valid_antecedent = (top_scores > -1e8) 
-        same_cluster = (cid_i == cid_j) & (cid_i != 0)  
+        valid_antecedent = (top_scores > -1e8)
+        same_cluster = (cid_i == cid_j) & (cid_i != 0) & valid_antecedent 
 
         gold_scores = top_scores.masked_fill(~same_cluster, -1e9)
         has_gold = same_cluster.any(dim=1)               

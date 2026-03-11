@@ -462,7 +462,6 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
 
             #CEAFe com Hungarian matching
             if pred_clusters and gold_clusters:
-                import numpy as np
                 sim_mat = np.zeros((len(pred_clusters), len(gold_clusters)), dtype=np.float64)
                 for i, pc in enumerate(pred_clusters):
                     pc_set = set(pc)
