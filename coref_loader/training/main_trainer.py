@@ -3,14 +3,10 @@ import torch
 import json
 from pathlib import Path
 from transformers import AutoTokenizer
-from coref_loader.data import CorefDataset, extract_gold_spans_with_clusters
+from coref_loader.data import CorefDataset, extract_gold_spans_with_clusters, sentence_chunks
 from coref_loader.training.model import CorefModel
 from tqdm import tqdm
 import numpy as np
-
-def sentence_chunks(sentences, max_segment_len):
-    for i in range(0, len(sentences), max_segment_len):
-        yield i, sentences[i : i + max_segment_len]
 
 def evaluate(model, dataset, tokenizer, config, device, limit=None):
     model.eval()

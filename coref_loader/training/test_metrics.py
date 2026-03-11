@@ -142,10 +142,9 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
     total_muc_p = 0
     total_muc_tp_r = 0
     total_muc_r = 0
-    total_b3_prec_num = 0
-    total_b3_prec_den = 0
-    total_b3_rec_num = 0
-    total_b3_rec_den = 0
+    total_b3_prec_sum = 0.0  
+    total_b3_rec_sum  = 0.0  
+    total_b3_count    = 0     
     total_ceaf_sim = 0
     total_ceaf_pred = 0
     total_ceaf_gold = 0
@@ -165,6 +164,7 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
             memory_segment_ids = []
             memory_beam_pred_ids = []
             memory_beam_sizes = []
+            memory_speaker_ids = [] 
             
             #gold clusters (start,end)
             gold_by_cid = {}
@@ -219,6 +219,28 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                 #spans do beam (indices em tokens do segmento)
                 starts_seg = dbg["span_starts_tok"].detach().cpu().tolist()
                 ends_seg   = dbg["span_ends_tok"].detach().cpu().tolist()
+                
+                #alteraçao: extraindo speaker ids do beam para este segmento (cross segment speaker propagation)
+                curr_speaker_ids = None
+                if model.use_speakers:
+                    raw_speakers = ex.get("speakers", None)
+                    if raw_speakers is not None:
+                        seg_sents_local = sentences[seg_start: seg_start + config["max_segment_len"]]
+                        seg_speaker_flat = [
+                            spk
+                            for sent_idx, sent_spk in enumerate(raw_speakers)
+                            if seg_start <= sent_idx < seg_start + len(seg_sents_local)
+                            for spk in sent_spk
+                        ]
+                        unique_spk = list(dict.fromkeys(seg_speaker_flat))
+                        spk_to_id = {s: idx for idx, s in enumerate(unique_spk)}
+                        raw_ids = []
+                        for s in starts_seg:
+                            if 0 <= s < len(seg_speaker_flat):
+                                raw_ids.append(spk_to_id.get(seg_speaker_flat[s], -1))
+                            else:
+                                raw_ids.append(-1)
+                        curr_speaker_ids = torch.tensor(raw_ids, dtype=torch.long, device=curr_span_emb.device)
 
                 #offset de tokens antes deste segmento no doc
                 seg_token_offset = sent_prefix[seg_start]
@@ -255,14 +277,17 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                     best_score = 0.0   #threshold: só linka se bater o dummy (score > 0)
                     best_pred_idx = -1
 
-                    #1.antecedentes no mesmo segmento (intra)
+                    #1.antecedentes no mesmo segmento (intra)iterar do melhor para o pior
                     if i > 0:
                         row_intra = intra_scores[i][:i]
-                        j_intra = int(row_intra.argmax())
-                        if row_intra[j_intra] > best_score:
+                        sorted_j = np.argsort(-row_intra)   #índices ordenados do maior score para o menor
+                        for j_intra in sorted_j:
+                            if row_intra[j_intra] <= best_score:
+                                break   #os restantes são ainda piores, não vale a pena continuar
                             if j_intra in beam_to_pred:
                                 best_score = row_intra[j_intra]
                                 best_pred_idx = beam_to_pred[j_intra]
+                                break   #encontrou o melhor antecedente válido, para
 
                     #2.antecedentes em segmentos anteriores (cross-segment)
                     #calcula só as interações: span_i atual vs. todos os spans anteriores
@@ -289,12 +314,22 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                         cross_feats = [emb_i_exp, emb_j_exp, emb_i_exp * emb_j_exp, seg_emb_cross]
 
                         if model.use_speakers:
-                            #speaker do span atual vs. todos os anteriores
-                            spk_label = torch.full(
-                                (prev_total,), 2, dtype=torch.long,
-                                device=prev_span_emb_cat.device
-                            )
-                            spk_emb_cross = model.speaker_embeddings(spk_label)  # [prev_total, 20]
+                            prev_spk_cat = torch.cat(memory_speaker_ids, dim=0)  #speaker ids de todos os spans anteriores
+                            spk_i_val = curr_speaker_ids[i].item() if curr_speaker_ids is not None else -1
+
+                            if spk_i_val < 0:
+                                #speaker atual desconhecido: tudo desconhecido
+                                spk_label = torch.full((prev_total,), 2, dtype=torch.long,
+                                                    device=prev_span_emb_cat.device)
+                            else:
+                                same    = (prev_spk_cat == spk_i_val).long()
+                                unknown = (prev_spk_cat < 0).long()
+                                spk_label = torch.where(
+                                    unknown == 1,
+                                    torch.full_like(same, 2),
+                                    1 - same    #0 = mesmo speaker, 1 = diferente
+                                )
+                            spk_emb_cross = model.speaker_embeddings(spk_label.to(prev_span_emb_cat.device))
                             cross_feats.append(spk_emb_cross)
 
                         pair_input_cross = torch.cat(cross_feats, dim=-1)  
@@ -304,8 +339,11 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                         cross_scores = cross_scores + curr_mention_scores[i] + prev_scores_cat
                         cross_scores = cross_scores.detach().cpu().numpy()
 
-                        best_j_cross = int(cross_scores.argmax())
-                        if cross_scores[best_j_cross] > best_score:
+                        #cross-segment: iterar do melhor para o pior até encontrar antecedente válido
+                        sorted_cross = np.argsort(-cross_scores)
+                        for best_j_cross in sorted_cross:
+                            if cross_scores[best_j_cross] <= best_score:
+                                break   #os restantes são ainda piores
                             #mapear best_j_cross -> pred_idx
                             tmp = best_j_cross
                             seg_k = 0
@@ -317,6 +355,7 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                                 if prev_pred_idx != -1:
                                     best_score = cross_scores[best_j_cross]
                                     best_pred_idx = prev_pred_idx
+                                    break   #encontrou antecedente válido
 
                     if best_pred_idx != -1:
                         pred_links.append((beam_to_pred[i], best_pred_idx))
@@ -325,7 +364,15 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                 memory_mention_scores.append(curr_mention_scores)
                 memory_segment_ids.append(curr_segment_ids)
                 memory_beam_pred_ids.append(beam_pred_ids)
-                memory_beam_sizes.append(curr_beam_size)               
+                memory_beam_sizes.append(curr_beam_size)
+                # guardar speaker ids — fallback para tensor de -1 se não disponível
+                if curr_speaker_ids is not None:
+                    memory_speaker_ids.append(curr_speaker_ids)
+                else:
+                    memory_speaker_ids.append(
+                        torch.full((curr_beam_size,), -1, dtype=torch.long,
+                                device=curr_span_emb.device)
+                    )               
             
             #debug:
             if doc_i == 0:
@@ -409,12 +456,9 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                 g = gold_m2c.get(m, {m})
                 p_set = pred_m2c.get(m, {m})
                 inter = len(g & p_set)
-
-                total_b3_prec_num += inter
-                total_b3_prec_den += len(p_set)
-
-                total_b3_rec_num += inter
-                total_b3_rec_den += len(g)
+                total_b3_prec_sum += inter / len(p_set)  
+                total_b3_rec_sum  += inter / len(g)      
+                total_b3_count    += 1
 
             #CEAFe com Hungarian matching
             if pred_clusters and gold_clusters:
@@ -435,8 +479,8 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
     muc_rec  = total_muc_tp_r / total_muc_r if total_muc_r > 0 else 0.0
     muc_f1 = (2*muc_prec*muc_rec/(muc_prec+muc_rec)) if (muc_prec+muc_rec)>0 else 0.0
     #b3:
-    b3_prec = total_b3_prec_num / total_b3_prec_den if total_b3_prec_den>0 else 0.0
-    b3_rec  = total_b3_rec_num  / total_b3_rec_den  if total_b3_rec_den>0 else 0.0
+    b3_prec = total_b3_prec_sum / total_b3_count if total_b3_count > 0 else 0.0
+    b3_rec  = total_b3_rec_sum  / total_b3_count if total_b3_count > 0 else 0.0
     b3_f1 = (2*b3_prec*b3_rec/(b3_prec+b3_rec)) if (b3_prec+b3_rec)>0 else 0.0
     #ceafe:
     ceaf_prec = total_ceaf_sim / total_ceaf_pred if total_ceaf_pred>0 else 0.0
