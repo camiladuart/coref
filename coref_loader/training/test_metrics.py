@@ -135,7 +135,7 @@ def muc_counts(clusters, other_m2c):
     return tp, p
 
 #funçao evaluate:
-def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
+def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0, mention_thresh=0.0):
     model.eval()
     #acumuladores globais (eu estava fazendo media por doc -> metricas altas -> alteraçao:)
     total_muc_tp_p = 0
@@ -251,10 +251,10 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                 
                 probs = torch.sigmoid(logits).detach().cpu().tolist()
                 beam_to_pred = {}   #índice do beam -> índice em pred_mentions
-                #alterei: sem threshold — todos os spans do beam são candidatos:
                 for i, (s, e, p) in enumerate(zip(starts_seg, ends_seg, probs)):
-                    beam_to_pred[i] = len(pred_mentions)
-                    pred_mentions.append((seg_token_offset + s, seg_token_offset + e))
+                    if p >= mention_thresh:
+                        beam_to_pred[i] = len(pred_mentions)
+                        pred_mentions.append((seg_token_offset + s, seg_token_offset + e))
 
                 if doc_i == 0 and seg_start == 0:
                     top = sorted([(p,i) for i,p in enumerate(probs)], reverse=True)[:10]
@@ -496,7 +496,8 @@ def main():
     ap.add_argument("--save_dir", required=True)
     ap.add_argument("--resume_from", default=None)
     ap.add_argument("--limit", type=int, default=0)
-    ap.add_argument("--split", choices=["dev", "test"], default="test")  # <-- novo
+    ap.add_argument("--split", choices=["dev", "test"], default="test")  
+    ap.add_argument("--mention_thresh", type=float, default=0.0, help="Threshold de menção (0.0 = todos os spans do beam)")
     args = ap.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -538,7 +539,9 @@ def main():
     print(f"[OK] Loaded checkpoint: {args.resume_from}")
 
     muc, b3, ceaf = evaluate_test_metrics(
-        model, ds, tokenizer, config, device, limit=args.limit
+        model, ds, tokenizer, config, device,
+        limit=args.limit,
+        mention_thresh=args.mention_thresh
     )
 
     print(f"\n{args.split.upper()} METRICS:")
