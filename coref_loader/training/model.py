@@ -198,7 +198,14 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         c = min(max_top_antecedents, k)
         #pegando os k maiores scores
         top_scores, top_indices = torch.topk(mention_scores, k)
-        
+
+        #ordenando beam por posição no texto (start crescente, depois end crescente) - alterei
+        sort_order = torch.argsort(
+            span_starts[top_indices] * 10000 + span_ends[top_indices]
+        )
+        top_indices = top_indices[sort_order]
+        top_scores  = top_scores[sort_order]
+
         #aplicar o beam: filtro -> só com spans do beam
         span_emb = span_emb[top_indices]
         span_starts = span_starts[top_indices]
@@ -403,24 +410,25 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         #construindo speaker_ids por span candidato (speaker do token inicial de cada span)
         speaker_ids_tensor = None
         if self.use_speakers and speakers is not None:
-            #achatando os speakers das sentenças numa lista plana por token
+            #vocab do documento inteiro — "John" tem sempre o mesmo ID em todos os segmentos
+            doc_speaker_flat = [spk for sent_spk in speakers for spk in sent_spk]
+            doc_unique_spk = list(dict.fromkeys(doc_speaker_flat))
+            doc_spk_to_id = {s: idx for idx, s in enumerate(doc_unique_spk)}
+
+            #lista plana só do segmento atual 
             seg_speaker_flat = [
                 spk
                 for sent_idx, sent_spk in enumerate(speakers)
                 if seg_start <= sent_idx < seg_start + len(seg_sents)
                 for spk in sent_spk
             ]
-            #vocab de speakers (string -> id numérico)
-            unique_spk = list(dict.fromkeys(seg_speaker_flat))  #preserva ordem, sem repetição
-            spk_to_id = {s: i for i, s in enumerate(unique_spk)}
-
-            #para cada span candidato filtrado (em token space), pegar o speaker do token inicial
             raw_ids = []
-            for s in span_starts_tok.tolist():  
+            for s in span_starts_tok.tolist():
                 if 0 <= s < len(seg_speaker_flat):
-                    raw_ids.append(spk_to_id.get(seg_speaker_flat[s], -1))
+                    #usa o vocab do doc, não o do segmento (mudança q tava dando results menores)
+                    raw_ids.append(doc_spk_to_id.get(seg_speaker_flat[s], -1))
                 else:
-                    raw_ids.append(-1)  
+                    raw_ids.append(-1)
             speaker_ids_tensor = torch.tensor(raw_ids, dtype=torch.long)
     
         #para todos os tensores que entram em _forward_wp estarem no mesmo device:

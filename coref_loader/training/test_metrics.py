@@ -225,6 +225,12 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                 if model.use_speakers:
                     raw_speakers = ex.get("speakers", None)
                     if raw_speakers is not None:
+                        #vocab do documento inteiro — mesmo que model.forward 
+                        doc_speaker_flat = [spk for sent_spk in raw_speakers for spk in sent_spk]
+                        doc_unique_spk = list(dict.fromkeys(doc_speaker_flat))
+                        doc_spk_to_id = {s: idx for idx, s in enumerate(doc_unique_spk)}
+
+                        #lista plana só do segmento atual
                         seg_sents_local = sentences[seg_start: seg_start + config["max_segment_len"]]
                         seg_speaker_flat = [
                             spk
@@ -232,12 +238,10 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                             if seg_start <= sent_idx < seg_start + len(seg_sents_local)
                             for spk in sent_spk
                         ]
-                        unique_spk = list(dict.fromkeys(seg_speaker_flat))
-                        spk_to_id = {s: idx for idx, s in enumerate(unique_spk)}
                         raw_ids = []
                         for s in starts_seg:
                             if 0 <= s < len(seg_speaker_flat):
-                                raw_ids.append(spk_to_id.get(seg_speaker_flat[s], -1))
+                                raw_ids.append(doc_spk_to_id.get(seg_speaker_flat[s], -1))
                             else:
                                 raw_ids.append(-1)
                         curr_speaker_ids = torch.tensor(raw_ids, dtype=torch.long, device=curr_span_emb.device)
@@ -246,11 +250,11 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                 seg_token_offset = sent_prefix[seg_start]
                 
                 probs = torch.sigmoid(logits).detach().cpu().tolist()
-                beam_to_pred = {}   # índice do beam -> índice em pred_mentions
+                beam_to_pred = {}   #índice do beam -> índice em pred_mentions
+                #alterei: sem threshold — todos os spans do beam são candidatos:
                 for i, (s, e, p) in enumerate(zip(starts_seg, ends_seg, probs)):
-                    if p >= 0.3:  # threshold de menção alterei de 0.5 - mt alto
-                        beam_to_pred[i] = len(pred_mentions)
-                        pred_mentions.append((seg_token_offset + s, seg_token_offset + e))
+                    beam_to_pred[i] = len(pred_mentions)
+                    pred_mentions.append((seg_token_offset + s, seg_token_offset + e))
 
                 if doc_i == 0 and seg_start == 0:
                     top = sorted([(p,i) for i,p in enumerate(probs)], reverse=True)[:10]
@@ -264,17 +268,14 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0):
                     if i in beam_to_pred:
                         beam_pred_ids[i] = beam_to_pred[i]
 
-                #links: para cada span atual que passou o threshold, escolher melhor antecedente entre spans do seg atual e spans de segs anteriores
+                #links: para cada span do beam, escolher melhor antecedente entre spans do seg atual e spans de segs anteriores
                 curr_beam_size = len(starts_seg)
 
                 #scores intra-segmento já calculados pelo modelo 
                 intra_scores = dbg["pair_scores"].detach().cpu().numpy() 
 
                 for i in range(curr_beam_size):
-                    if i not in beam_to_pred:
-                        continue
-
-                    best_score = 0.0   #threshold: só linka se bater o dummy (score > 0)
+                    best_score = 0.0   #só linka se bater o dummy (score > 0)
                     best_pred_idx = -1
 
                     #1.antecedentes no mesmo segmento (intra)iterar do melhor para o pior
