@@ -275,7 +275,9 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0, me
                 intra_scores = dbg["pair_scores"].detach().cpu().numpy() 
 
                 for i in range(curr_beam_size):
-                    best_score = 0.0   #só linka se bater o dummy (score > 0)
+                    if i not in beam_to_pred:
+                        continue
+                    best_score = 0.0
                     best_pred_idx = -1
 
                     #1.antecedentes no mesmo segmento (intra)iterar do melhor para o pior
