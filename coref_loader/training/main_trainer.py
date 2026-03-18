@@ -147,6 +147,7 @@ def main():
     ap.add_argument("--data_dir", required=True, help="Pasta com *.english.jsonlines")
     ap.add_argument("--split", default="train", choices=["train", "dev", "test"])
     ap.add_argument("--limit", type=int, default=0, help="Quantos docs usar (0 = todos)")
+    ap.add_argument("--encoder_name", type=str, default="bert-base-cased", help="Encoder HuggingFace (ex: neuralmind/bert-base-portuguese-cased)")
 
     # Training arguments
     ap.add_argument("--epochs", type=int, default=20, help="Número de épocas")
@@ -168,7 +169,7 @@ def main():
     
     # Config
     config = {
-        "encoder_name": "bert-base-cased",
+        "encoder_name": args.encoder_name,
         "max_seq_length": 512,
         "max_span_width": 30,
         "max_segment_len": 11,
@@ -180,7 +181,7 @@ def main():
         "dropout_rate": 0.2,
         "ffnn_size": 1000, #valores menores para controle
         "pair_ffnn_size": 1000,
-        "use_speakers": True,
+        "use_speakers": False,
         "speaker_emb_size": 20, #tamanho do emb de speaker
     }
     config["max_seq_length"] = args.max_seq_length
