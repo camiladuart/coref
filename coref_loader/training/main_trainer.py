@@ -181,7 +181,7 @@ def main():
         "dropout_rate": 0.2,
         "ffnn_size": 1000, #valores menores para controle
         "pair_ffnn_size": 1000,
-        "use_speakers": False,
+        "use_speakers": True,
         "speaker_emb_size": 20, #tamanho do emb de speaker
     }
     config["max_seq_length"] = args.max_seq_length
