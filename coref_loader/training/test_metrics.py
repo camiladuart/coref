@@ -8,6 +8,55 @@ from coref_loader.training.model import CorefModel
 from coref_loader.data import sentence_chunks
 from scipy.optimize import linear_sum_assignment
 
+#funcao auxiliar p normalizar speakers (formato):
+def normalize_speakers_for_doc(speakers, sentences):
+    if speakers is None:
+        return None
+
+    if sentences is None or not isinstance(sentences, list):
+        return None
+
+    if (
+        isinstance(speakers, list)
+        and len(speakers) == len(sentences)
+        and all(isinstance(x, list) for x in speakers)
+    ):
+        normalized = []
+        for sent_tokens, sent_spk in zip(sentences, speakers):
+            if sent_spk is None:
+                normalized.append(["UNK"] * len(sent_tokens))
+                continue
+            if len(sent_spk) == len(sent_tokens):
+                normalized.append([str(s) if s is not None else "UNK" for s in sent_spk])
+            elif len(sent_spk) == 1:
+                spk = str(sent_spk[0]) if sent_spk[0] is not None else "UNK"
+                normalized.append([spk] * len(sent_tokens))
+            else:
+                return None
+        return normalized
+
+    if isinstance(speakers, list) and all(not isinstance(x, list) for x in speakers):
+        flat_tokens = [tok for sent in sentences for tok in sent]
+        if len(speakers) == len(flat_tokens):
+            normalized = []
+            pos = 0
+            for sent_tokens in sentences:
+                n = len(sent_tokens)
+                chunk = speakers[pos:pos+n]
+                normalized.append([str(s) if s is not None else "UNK" for s in chunk])
+                pos += n
+            return normalized
+
+    if isinstance(speakers, list) and len(speakers) == len(sentences):
+        if all(not isinstance(x, list) for x in speakers):
+            normalized = []
+            for sent_tokens, spk in zip(sentences, speakers):
+                speaker_name = str(spk) if spk is not None else "UNK"
+                normalized.append([speaker_name] * len(sent_tokens))
+            return normalized
+
+    return None
+
 #criar mapa - a qual cluster cada span pertence: 
 def _flatten_clusters(clusters):
     m2c = {} #mention to cluster
@@ -155,6 +204,7 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0, me
                 break
 
             sentences = ex["sentences"]
+            raw_speakers = normalize_speakers_for_doc(ex.get("speakers", None), sentences)
             gold_starts_all, gold_ends_all, gold_cluster_ids_all = extract_gold_spans_with_clusters(ex)
             genre = ex.get("genre", None)
 
@@ -204,7 +254,7 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0, me
                     gold_cluster_ids_all=gold_cluster_ids_all,
                     max_span_width=config["max_span_width"],
                     genre=genre,
-                    speakers=ex.get("speakers", None),
+                    speakers=raw_speakers,
                     return_debug=True,
                 )
 
@@ -223,7 +273,6 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0, me
                 #alteraçao: extraindo speaker ids do beam para este segmento (cross segment speaker propagation)
                 curr_speaker_ids = None
                 if model.use_speakers:
-                    raw_speakers = ex.get("speakers", None)
                     if raw_speakers is not None:
                         #vocab do documento inteiro — mesmo que model.forward 
                         doc_speaker_flat = [spk for sent_spk in raw_speakers for spk in sent_spk]

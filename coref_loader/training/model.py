@@ -117,6 +117,67 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         head_vecs = (attn_weights.unsqueeze(-1) * span_token_embs).sum(dim=1)
 
         return head_vecs
+    
+    #normalizando speakers para usar speakers info sem ter problemas em formato de datasets:
+    def normalize_speakers(self, speakers, sentences): #Retorna speakers no formato List[List[str]] com mesmo shape de sentences, ou None se não der para usar speakers com segurança
+        if speakers is None:
+            return None
+
+        if sentences is None or not isinstance(sentences, list):
+            return None
+
+        #se já veio como lista de listas (ideal):
+        if (
+            isinstance(speakers, list)
+            and len(speakers) == len(sentences)
+            and all(isinstance(x, list) for x in speakers)
+        ):
+            normalized = []
+            for sent_tokens, sent_spk in zip(sentences, speakers):
+                if not isinstance(sent_tokens, list):
+                    return None
+                if sent_spk is None:
+                    normalized.append(["UNK"] * len(sent_tokens))
+                    continue
+                if not isinstance(sent_spk, list):
+                    return None
+
+                #se:mesmo tamanho da sentença 
+                if len(sent_spk) == len(sent_tokens):
+                    normalized.append([str(s) if s is not None else "UNK" for s in sent_spk])
+                #1 speaker para a sentença inteira -> replica
+                elif len(sent_spk) == 1:
+                    spk = str(sent_spk[0]) if sent_spk[0] is not None else "UNK"
+                    normalized.append([spk] * len(sent_tokens))
+                else:
+                    #formato inconsistente
+                    return None
+            return normalized
+
+        #se speakers é uma lista plana do documento inteiro:
+        if isinstance(speakers, list) and all(not isinstance(x, list) for x in speakers):
+            flat_tokens = [tok for sent in sentences for tok in sent]
+            if len(speakers) == len(flat_tokens):
+                normalized = []
+                pos = 0
+                for sent_tokens in sentences:
+                    n = len(sent_tokens)
+                    chunk = speakers[pos:pos+n]
+                    normalized.append([str(s) if s is not None else "UNK" for s in chunk])
+                    pos += n
+                return normalized
+
+        #se for 1 speaker por sentença:
+        if isinstance(speakers, list) and len(speakers) == len(sentences):
+            if all(not isinstance(x, list) for x in speakers):
+                normalized = []
+                for sent_tokens, spk in zip(sentences, speakers):
+                    speaker_name = str(spk) if spk is not None else "UNK"
+                    normalized.append([speaker_name] * len(sent_tokens))
+                return normalized
+
+        #se for qualquer outro formato: desliga speakers para esse documento
+        return None
 
     def _forward_wp(
         self,
@@ -293,6 +354,8 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         speakers=None,
         span_segment_ids=None, return_debug: bool = False
     ):  
+        speakers = self.normalize_speakers(speakers, sentences)
+        
     # juntar sentenças e construir sentence_map
         tokens, sentence_map = flatten_sentences(seg_sents)
         if not tokens:
@@ -407,28 +470,27 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         
         assert span_starts.size(0) == mention_labels.size(0)
         
-        #construindo speaker_ids por span candidato (speaker do token inicial de cada span)
+        #construindo speaker_ids (trabalhando com dados já padronizados)
         speaker_ids_tensor = None
         if self.use_speakers and speakers is not None:
-            #vocab do documento inteiro — "John" tem sempre o mesmo ID em todos os segmentos
             doc_speaker_flat = [spk for sent_spk in speakers for spk in sent_spk]
             doc_unique_spk = list(dict.fromkeys(doc_speaker_flat))
             doc_spk_to_id = {s: idx for idx, s in enumerate(doc_unique_spk)}
 
-            #lista plana só do segmento atual 
             seg_speaker_flat = [
                 spk
                 for sent_idx, sent_spk in enumerate(speakers)
                 if seg_start <= sent_idx < seg_start + len(seg_sents)
                 for spk in sent_spk
             ]
+
             raw_ids = []
             for s in span_starts_tok.tolist():
                 if 0 <= s < len(seg_speaker_flat):
-                    #usa o vocab do doc, não o do segmento (mudança q tava dando results menores)
                     raw_ids.append(doc_spk_to_id.get(seg_speaker_flat[s], -1))
                 else:
                     raw_ids.append(-1)
+
             speaker_ids_tensor = torch.tensor(raw_ids, dtype=torch.long)
     
         #para todos os tensores que entram em _forward_wp estarem no mesmo device:
