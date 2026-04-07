@@ -36,7 +36,7 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
             span_emb_size += config["genre_emb_size"]
             
         self.use_segment_distance = True
-        self.max_training_sentences = config.get("max_training_sentences", 10)
+        self.max_training_sentences = config.get("max_training_sentences", 50)
 
         if self.use_segment_distance:
             self.seg_dist_emb_size = 20
@@ -354,7 +354,6 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         speakers=None,
         span_segment_ids=None, return_debug: bool = False
     ):  
-        speakers = self.normalize_speakers(speakers, sentences)
         
     # juntar sentenças e construir sentence_map
         tokens, sentence_map = flatten_sentences(seg_sents)

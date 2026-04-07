@@ -185,6 +185,7 @@ def main():
         "pair_ffnn_size": 1000,
         "use_speakers": True,
         "speaker_emb_size": 20, #tamanho do emb de speaker
+        "max_training_sentences": 50,  
     }
     config["max_seq_length"] = args.max_seq_length
     
