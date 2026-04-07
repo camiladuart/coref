@@ -280,7 +280,7 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0, me
                         doc_spk_to_id = {s: idx for idx, s in enumerate(doc_unique_spk)}
 
                         #lista plana só do segmento atual
-                        seg_sents_local = sentences[seg_start: seg_start + config["max_segment_len"]]
+                        seg_sents_local = seg_sents
                         seg_speaker_flat = [
                             spk
                             for sent_idx, sent_spk in enumerate(raw_speakers)

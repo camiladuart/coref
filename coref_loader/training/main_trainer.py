@@ -21,6 +21,7 @@ def evaluate(model, dataset, tokenizer, config, device, limit=None):
                 break
                 
             sentences = ex["sentences"]
+            speakers_norm = model.normalize_speakers(ex.get("speakers", None), sentences)
             gold_starts_all, gold_ends_all, gold_cluster_ids_all = extract_gold_spans_with_clusters(ex)
             genre = ex.get("genre", None)
             
@@ -39,7 +40,7 @@ def evaluate(model, dataset, tokenizer, config, device, limit=None):
                     gold_cluster_ids_all=gold_cluster_ids_all,
                     max_span_width=config["max_span_width"],
                     genre=genre,
-                    speakers=ex.get("speakers", None),
+                    speakers=speakers_norm,
                 )
                 
                 if logits.numel() == 0:
@@ -81,6 +82,7 @@ def train_epoch(model, dataset, tokenizer, config, optimizer, device, epoch, sch
             break
 
         sentences = ex["sentences"]
+        speakers_norm = model.normalize_speakers(ex.get("speakers", None), sentences)
         gold_starts_all, gold_ends_all, gold_cluster_ids_all = extract_gold_spans_with_clusters(ex)
         genre = ex.get("genre", None)
 
@@ -103,7 +105,7 @@ def train_epoch(model, dataset, tokenizer, config, optimizer, device, epoch, sch
                 gold_cluster_ids_all=gold_cluster_ids_all,
                 max_span_width=config["max_span_width"],
                 genre=genre,
-                speakers=ex.get("speakers", None),
+                speakers=speakers_norm,
             )
 
             if logits.numel() == 0:
@@ -261,6 +263,7 @@ def main():
         print(f"\nDOC_KEY: {ex.get('doc_key','(sem doc_key)')}")
         print(f"GENRE: {ex.get('genre', None)}")
         sentences = ex["sentences"]
+        speakers_norm = model.normalize_speakers(ex.get("speakers", None), sentences)
         print(f"Num sentences: {len(sentences)}")
 
         gold_starts_all, gold_ends_all, gold_cluster_ids_all = extract_gold_spans_with_clusters(ex)
@@ -278,7 +281,7 @@ def main():
                     gold_cluster_ids_all=gold_cluster_ids_all,
                     max_span_width=config["max_span_width"],
                     genre=genre,
-                    speakers=ex.get("speakers", None),
+                    speakers=speakers_norm,
                     return_debug=True,
                 )
 
