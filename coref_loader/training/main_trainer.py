@@ -144,9 +144,109 @@ def train_epoch(model, dataset, tokenizer, config, optimizer, device, epoch, sch
     avg_acc = total_acc / max(total_spans, 1)
     return avg_loss, avg_acc
 
+#retorna lista de (ds_idx, doc_idx) amostrada com temperature sampling para uma epoch:
+def build_temperature_sampled_order(datasets, temperature):
+    sizes = np.array([len(ds) for ds in datasets], dtype=np.float64)
+    probs = sizes ** (1.0 / temperature)
+    probs = probs / probs.sum()
+
+    total = int(sizes.sum())  # total de docs por epoch = soma de todos
+    dataset_choices = np.random.choice(len(datasets), size=total, p=probs)
+
+    # para cada dataset, índices embaralhados (com re-shuffle quando esgota)
+    shuffled = [np.random.permutation(int(s)).tolist() for s in sizes]
+    counters = [0] * len(datasets)
+
+    order = []
+    for ds_idx in dataset_choices:
+        n = int(sizes[ds_idx])
+        pos = counters[ds_idx] % n
+        if pos == 0 and counters[ds_idx] > 0:
+            shuffled[ds_idx] = np.random.permutation(n).tolist()
+        doc_idx = shuffled[ds_idx][pos]
+        order.append((ds_idx, doc_idx))
+        counters[ds_idx] += 1
+
+    return order
+
+#nova função de treino para uma epoch com múltiplos datasets e temperature sampling:
+def train_epoch_multi(model, datasets, tokenizer, config, optimizer, device,
+                      epoch, temperature, scheduler=None):
+    model.train()
+    total_loss = 0.0
+    total_acc = 0.0
+    total_spans = 0
+    doc_count = 0
+
+    order = build_temperature_sampled_order(datasets, temperature)
+
+    pbar = tqdm(order, total=len(order), desc=f"Epoch {epoch} [T={temperature}]")
+
+    for ds_idx, doc_idx in pbar:
+        ex = datasets[ds_idx][doc_idx]
+
+        sentences = ex["sentences"]
+        speakers_norm = model.normalize_speakers(ex.get("speakers", None), sentences)
+        gold_starts_all, gold_ends_all, gold_cluster_ids_all = \
+            extract_gold_spans_with_clusters(ex)
+        genre = ex.get("genre", None)
+
+        doc_spans = 0
+        doc_correct = 0
+        optimizer.zero_grad(set_to_none=True)
+        doc_total_loss = torch.tensor(0.0, device=device)
+
+        for seg_start, seg_sents in sentence_chunks(sentences, config["max_segment_len"]):
+            logits, mention_labels, loss = model.forward(
+                sentences=sentences,
+                seg_start=seg_start,
+                seg_sents=seg_sents,
+                tokenizer=tokenizer,
+                gold_starts_all=gold_starts_all,
+                gold_ends_all=gold_ends_all,
+                gold_cluster_ids_all=gold_cluster_ids_all,
+                max_span_width=config["max_span_width"],
+                genre=genre,
+                speakers=speakers_norm,
+            )
+
+            if logits.numel() == 0:
+                continue
+
+            if loss is not None and torch.is_tensor(loss) and loss.requires_grad:
+                doc_total_loss = doc_total_loss + loss
+
+            with torch.no_grad():
+                probs = torch.sigmoid(logits)
+                preds = (probs >= 0.5).long()
+                doc_correct += (preds == mention_labels).sum().item()
+                doc_spans += mention_labels.numel()
+
+        if doc_spans > 0:
+            doc_total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
+
+            total_loss += float(doc_total_loss.item())
+            total_acc += doc_correct
+            total_spans += doc_spans
+            doc_count += 1
+
+            pbar.set_postfix({
+                "loss": f"{total_loss / doc_count:.4f}",
+                "acc":  f"{total_acc / total_spans:.3f}",
+                "ds":   str(ds_idx),
+            })
+
+    avg_loss = total_loss / max(doc_count, 1)
+    avg_acc  = total_acc  / max(total_spans, 1)
+    return avg_loss, avg_acc
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data_dir", required=True, help="Pasta com *.english.jsonlines")
+    ap.add_argument("--data_dir", default=None, help="Pasta com dados (single dataset). Não usar com --multi_data_dirs")
     ap.add_argument("--split", default="train", choices=["train", "dev", "test"])
     ap.add_argument("--limit", type=int, default=0, help="Quantos docs usar (0 = todos)")
     ap.add_argument("--encoder_name", type=str, default="bert-base-cased", help="Encoder HuggingFace (ex: neuralmind/bert-base-portuguese-cased)")
@@ -166,6 +266,14 @@ def main():
     ap.add_argument("--bert_lr", type=float, default=2e-5, help="LR do encoder (SpanBERT: 1e-5 ou 2e-5)")
     ap.add_argument("--task_lr", type=float, default=1e-4, help="LR das camadas do task (SpanBERT: 1e-4/2e-4/3e-4)")
     ap.add_argument("--warmup_ratio", type=float, default=0.1, help="Fração do treino para warmup (default: 10%)") #add learning rate scheduler
+    
+    # arguments multilingual:
+    ap.add_argument("--multi_data_dirs", type=str, default=None,
+        help="Pastas dos datasets separadas por vírgula. Ex: /path/pt,/path/es,/path/ca")
+    ap.add_argument("--temperature", type=float, default=1.0,
+        help="Temperatura para sampling (T=5 equilibra, T=1 é proporcional ao tamanho)")
+    ap.add_argument("--temperature_switch_epoch", type=int, default=None,
+        help="Epoch a partir da qual muda de T=5 para T=1. None = usa --temperature fixo")
 
     args = ap.parse_args()
     
@@ -173,9 +281,9 @@ def main():
     config = {
         "encoder_name": args.encoder_name,
         "max_seq_length": 512,
-        "max_span_width": 30,
+        "max_span_width": 20,
         "max_segment_len": 11,
-        "top_span_ratio": 0.4,
+        "top_span_ratio": 0.3,
         "max_top_antecedents": 50,
         "use_genre": False, 
         "genres": [],
@@ -194,13 +302,30 @@ def main():
     save_dir.mkdir(exist_ok=True)
 
     # Load datasets
-    print(f"[Loading datasets from: {args.data_dir}]")
-
+    if args.data_dir:
+        print(f"[Loading dataset from: {args.data_dir}]")
+    
     train_ds = None
     dev_ds = None
     test_ds = None
+    train_datasets = []   # lista para modo multilingue
 
-    if args.split == "train":
+    #MODO MULTILINGUE:
+    if args.multi_data_dirs and args.split == "train":
+        dirs = [d.strip() for d in args.multi_data_dirs.split(",")]
+        print(f"[MULTI] Carregando {len(dirs)} datasets:")
+        for d in dirs:
+            ds_train = CorefDataset(d, "train", config)
+            ds_dev   = CorefDataset(d, "dev",   config)
+            train_datasets.append(ds_train)
+            print(f"  {d}: train={len(ds_train)} dev={len(ds_dev)}")
+        # dev = todos os devs juntos (para avaliação rápida durante treino)
+        # usando o primeiro dev como referência de acompanhamento
+        dev_ds = CorefDataset(dirs[0], "dev", config)
+        print(f"[MULTI] Dev de referência: {dirs[0]} ({len(dev_ds)} docs)")
+
+    #MODO SINGLE (comportamento original):
+    elif args.split == "train":
         train_ds = CorefDataset(args.data_dir, "train", config)
         dev_ds   = CorefDataset(args.data_dir, "dev", config)
         print(f"[OK] Train: {len(train_ds)} docs")
@@ -213,7 +338,7 @@ def main():
     elif args.split == "test":
         test_ds = CorefDataset(args.data_dir, "test", config)
         print(f"[OK] Test: {len(test_ds)} docs")
-    
+        
     # Auto-detect genres
     if config.get("use_genre", False):
         #detectar a partir do train
@@ -448,8 +573,14 @@ def main():
         {"params": task_params, "lr": args.task_lr},
     ]
     )
-    #learning rate scheduler: warmup linear + decay linear até zero
-    total_steps = args.epochs * len(train_ds)  # 1 step por documento
+    
+    # total_steps para o scheduler
+    if train_datasets:
+        total_docs_per_epoch = sum(len(ds) for ds in train_datasets)
+    else:
+        total_docs_per_epoch = len(train_ds)
+
+    total_steps = args.epochs * total_docs_per_epoch
     warmup_steps = int(total_steps * args.warmup_ratio)
     from transformers import get_linear_schedule_with_warmup
     scheduler = get_linear_schedule_with_warmup(
@@ -465,22 +596,36 @@ def main():
         print(f"\n{'='*60}")
         print(f"EPOCH {epoch+1}/{args.epochs}")
         print(f"{'='*60}")
-        
-        # Train
-        train_loss, train_acc = train_epoch(
-            model, train_ds, tokenizer, config, optimizer, device,
-            epoch+1, scheduler=scheduler,
-            limit=args.limit if args.limit > 0 else None
-        )
+
+        # determinar temperatura desta epoch
+        if args.temperature_switch_epoch is not None:
+            current_temp = 5.0 if (epoch + 1) <= args.temperature_switch_epoch else 1.0
+        else:
+            current_temp = args.temperature
+        print(f"[Temperature: {current_temp}]")
+
+        # Train — multilingue ou single
+        if train_datasets:
+            train_loss, train_acc = train_epoch_multi(
+                model, train_datasets, tokenizer, config, optimizer, device,
+                epoch+1, temperature=current_temp, scheduler=scheduler,
+            )
+        else:
+            train_loss, train_acc = train_epoch(
+                model, train_ds, tokenizer, config, optimizer, device,
+                epoch+1, scheduler=scheduler,
+                limit=args.limit if args.limit > 0 else None,
+            )
+
         print(f"\n[Train] Loss: {train_loss:.4f} | Acc: {train_acc:.3f}")
+
         if (epoch + 1) % args.eval_every == 0:
             dev_loss, dev_acc = evaluate(
                 model, dev_ds, tokenizer, config, device,
-                limit=args.limit if args.limit > 0 else None
+                limit=args.limit if args.limit > 0 else None,
             )
             print(f"[Dev] Loss: {dev_loss:.4f} | Acc: {dev_acc:.3f}")
 
-        # Save checkpoint every epoch
         checkpoint_path = save_dir / f"checkpoint_epoch_{epoch+1}.pt"
         torch.save({
             'epoch': epoch + 1,
