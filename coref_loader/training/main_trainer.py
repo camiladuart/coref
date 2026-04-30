@@ -257,6 +257,7 @@ def main():
     ap.add_argument("--eval_every", type=int, default=1, help="Avaliar a cada N épocas")
     ap.add_argument("--save_dir", type=str, default="checkpoints", help="Diretório para salvar modelos")
     ap.add_argument("--resume_from", type=str, default=None, help="Checkpoint para continuar treinamento")
+    ap.add_argument("--max_span_width", type=int, default=20, help="Largura máxima dos spans candidatos (SpanBERT usa 30, default 20 para menor memória)")
     
     ap.add_argument("--inspect", action="store_true", help="Inspeciona 1 doc do split.")
     ap.add_argument("--inspect_idx", type=int, default=0, help="Índice do documento a inspecionar no split.")
@@ -280,15 +281,14 @@ def main():
     # Config
     config = {
         "encoder_name": args.encoder_name,
-        "max_seq_length": 512,
-        "max_span_width": 20,
-        "max_segment_len": 11,
+        "max_span_width": args.max_span_width,
+        "max_segment_len": 25,
         "top_span_ratio": 0.3,
         "max_top_antecedents": 50,
         "use_genre": False, 
         "genres": [],
         "genre_emb_size": 20,
-        "dropout_rate": 0.2,
+        "dropout_rate": 0.3,
         "ffnn_size": 1000, #valores menores para controle
         "pair_ffnn_size": 1000,
         "use_speakers": True,
@@ -360,10 +360,12 @@ def main():
     
     # Resume from checkpoint 
     start_epoch = 0
+    _resume_checkpoint = None
     if args.resume_from and args.split in ["train", "test"]:
-        checkpoint = torch.load(args.resume_from, map_location=device)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        print(f"[Loaded checkpoint: {args.resume_from}]")
+        _resume_checkpoint = torch.load(args.resume_from, map_location=device)
+        model.load_state_dict(_resume_checkpoint['model_state_dict'])
+        start_epoch = _resume_checkpoint.get('epoch', 0)
+        print(f"[Loaded checkpoint: {args.resume_from} | resuming from epoch {start_epoch}]")
 
     def union_find_clusters(n, links):
         parent = list(range(n))
@@ -589,7 +591,19 @@ def main():
         num_training_steps=total_steps,
     )
     print(f"[Scheduler] total_steps={total_steps} warmup_steps={warmup_steps}")
+    
+    # restaurar optimizer e scheduler se estiver a resumir treino
+    if _resume_checkpoint is not None and args.split == "train":
+        if 'optimizer_state_dict' in _resume_checkpoint:
+            optimizer.load_state_dict(_resume_checkpoint['optimizer_state_dict'])
+            print("[Restored optimizer state]")
+        if 'scheduler_state_dict' in _resume_checkpoint:
+            scheduler.load_state_dict(_resume_checkpoint['scheduler_state_dict'])
+            print("[Restored scheduler state]")
 
+    #inicializando dev_loss caso eval_every > 1: 
+    dev_loss = None
+    dev_acc = None
     # Training loop
     print("\n[Starting training...]")
     for epoch in range(start_epoch, args.epochs):
@@ -633,9 +647,29 @@ def main():
             'optimizer_state_dict': optimizer.state_dict(),
             'scheduler_state_dict': scheduler.state_dict(),
             'train_loss': train_loss,
+            'dev_loss': dev_loss if (epoch + 1) % args.eval_every == 0 else None,
             'config': config,
         }, checkpoint_path)
         print(f"Saved checkpoint to {checkpoint_path}")
+
+    #guardar CSV de losses para curva de aprendizado
+    curves_path = save_dir / "learning_curves.csv"
+    # recolher de todos os checkpoints guardados
+    import csv
+    rows = []
+    for p in sorted(save_dir.glob("checkpoint_epoch_*.pt"),
+                    key=lambda x: int(x.stem.split("_")[-1])):
+        ckpt_data = torch.load(p, map_location="cpu")
+        ep = ckpt_data.get("epoch", "?")
+        tl = ckpt_data.get("train_loss", None)
+        dl = ckpt_data.get("dev_loss", None)
+        rows.append({"epoch": ep, "train_loss": tl, "dev_loss": dl})
+
+    with open(curves_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["epoch", "train_loss", "dev_loss"])
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"[Curves] Learning curves saved to {curves_path}")
 
     print("\n[Training completed!]")
 

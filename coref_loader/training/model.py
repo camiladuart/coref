@@ -322,9 +322,13 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         # loss de menção (span detection)
         mention_loss = torch.zeros((), device=device, dtype=dtype)
         if mention_labels is not None and mention_labels.numel() > 0:
-            mention_loss = torch.nn.functional.binary_cross_entropy_with_logits( #função do pytorch
-                logits,                    # = top_scores
-                mention_labels.float()
+            n_pos = mention_labels.sum().float().clamp(min=1.0)
+            n_neg = (mention_labels == 0).sum().float().clamp(min=1.0)
+            pos_weight = (n_neg / n_pos).clamp(max=20.0)
+            mention_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+                logits,
+                mention_labels.float(),
+                pos_weight=pos_weight,
             )
 
         loss = loss + mention_loss

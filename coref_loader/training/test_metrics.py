@@ -105,21 +105,20 @@ def b3_f1(pred_clusters, gold_clusters):
         for m in cl:
             pred_m2c[m] = set(cl)
 
-    mentions = set(gold_m2c.keys()) | set(pred_m2c.keys()) #junta as mençoes do gold e previstas
-    if not mentions:
+    gold_mentions = set(gold_m2c.keys())
+    if not gold_mentions:
         return 0.0
-
     prec_sum = 0.0
     rec_sum = 0.0
-    for m in mentions:
-        g = gold_m2c.get(m, {m})
+    for m in gold_mentions:
+        g = gold_m2c[m]
         p = pred_m2c.get(m, {m})
-        inter = len(g & p) #mençoes que coincidem g e p 
+        inter = len(g & p)
         prec_sum += inter / len(p)
         rec_sum  += inter / len(g)
 
-    prec = prec_sum / len(mentions)
-    rec  = rec_sum  / len(mentions)
+    prec = prec_sum / len(gold_mentions)
+    rec  = rec_sum  / len(gold_mentions)
     f1 = (2*prec*rec/(prec+rec)) if (prec+rec) > 0 else 0.0
     return f1
 
@@ -502,14 +501,13 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0, me
                 for m in cl:
                     pred_m2c[m] = set(cl)
 
-            mentions = set(gold_m2c.keys()) | set(pred_m2c.keys())
-
-            for m in mentions:
-                g = gold_m2c.get(m, {m})
-                p_set = pred_m2c.get(m, {m})
+            # B³ standard: só menções gold
+            for m in set(gold_m2c.keys()):
+                g = gold_m2c[m]
+                p_set = pred_m2c.get(m, {m})   # singleton se não foi predita
                 inter = len(g & p_set)
-                total_b3_prec_sum += inter / len(p_set)  
-                total_b3_rec_sum  += inter / len(g)      
+                total_b3_prec_sum += inter / len(p_set)
+                total_b3_rec_sum  += inter / len(g)
                 total_b3_count    += 1
 
             #CEAFe com Hungarian matching
