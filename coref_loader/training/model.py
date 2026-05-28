@@ -261,8 +261,9 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         top_scores, top_indices = torch.topk(mention_scores, k)
 
         #ordenando beam por posição no texto (start crescente, depois end crescente) - alterei
+        T = span_ends[top_indices].max().item() + 1  # nº real de tokens no segmento
         sort_order = torch.argsort(
-            span_starts[top_indices] * 10000 + span_ends[top_indices]
+            span_starts[top_indices] * T + span_ends[top_indices]
         )
         top_indices = top_indices[sort_order]
         top_scores  = top_scores[sort_order]

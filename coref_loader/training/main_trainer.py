@@ -258,6 +258,7 @@ def main():
     ap.add_argument("--save_dir", type=str, default="checkpoints", help="Diretório para salvar modelos")
     ap.add_argument("--resume_from", type=str, default=None, help="Checkpoint para continuar treinamento")
     ap.add_argument("--max_span_width", type=int, default=20, help="Largura máxima dos spans candidatos (SpanBERT usa 30, default 20 para menor memória)")
+    ap.add_argument("--max_segment_len", type=int, default=128, help="Nº máximo de frases por segmento. 128+ cobre doc inteiro (fix mismatch treino/eval)")
     
     ap.add_argument("--inspect", action="store_true", help="Inspeciona 1 doc do split.")
     ap.add_argument("--inspect_idx", type=int, default=0, help="Índice do documento a inspecionar no split.")
@@ -282,7 +283,7 @@ def main():
     config = {
         "encoder_name": args.encoder_name,
         "max_span_width": args.max_span_width,
-        "max_segment_len": 25,
+        "max_segment_len": args.max_segment_len,
         "top_span_ratio": 0.3,
         "max_top_antecedents": 50,
         "use_genre": False, 
@@ -293,7 +294,7 @@ def main():
         "pair_ffnn_size": 1000,
         "use_speakers": True,
         "speaker_emb_size": 20, #tamanho do emb de speaker
-        "max_training_sentences": 50,  
+        "max_training_sentences": args.max_segment_len,  
     }
     config["max_seq_length"] = args.max_seq_length
     
