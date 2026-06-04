@@ -29,11 +29,9 @@ def evaluate(model, dataset, tokenizer, config, device, limit=None):
             doc_spans = 0
             doc_correct = 0
             
-            for seg_start, seg_sents in sentence_chunks(sentences, config["max_segment_len"]):
-                logits, mention_labels, loss = model.forward(
+            with torch.no_grad():
+                logits, mention_labels, loss = model.forward_document(
                     sentences=sentences,
-                    seg_start=seg_start,
-                    seg_sents=seg_sents,
                     tokenizer=tokenizer,
                     gold_starts_all=gold_starts_all,
                     gold_ends_all=gold_ends_all,
@@ -42,17 +40,17 @@ def evaluate(model, dataset, tokenizer, config, device, limit=None):
                     genre=genre,
                     speakers=speakers_norm,
                 )
-                
-                if logits.numel() == 0:
-                    continue
-                    
-                if loss is not None and torch.is_tensor(loss):
-                    doc_loss += loss.item()
-                    
-                probs = torch.sigmoid(logits)
-                preds = (probs >= 0.5).long()
-                doc_correct += (preds == mention_labels).sum().item()
-                doc_spans += mention_labels.numel()
+
+            if logits.numel() == 0:
+                continue
+
+            if loss is not None and torch.is_tensor(loss):
+                doc_loss += loss.item()
+
+            probs = torch.sigmoid(logits)
+            preds = (probs >= 0.5).long()
+            doc_correct += (preds == mention_labels).sum().item()
+            doc_spans += mention_labels.numel()
             
             if doc_spans > 0:
                 total_loss += doc_loss
@@ -94,33 +92,29 @@ def train_epoch(model, dataset, tokenizer, config, optimizer, device, epoch, sch
         #loss acumulada do documento (tensor)
         doc_total_loss = torch.tensor(0.0, device=device)
 
-        for seg_start, seg_sents in sentence_chunks(sentences, config["max_segment_len"]):
-            logits, mention_labels, loss = model.forward(
-                sentences=sentences,
-                seg_start=seg_start,
-                seg_sents=seg_sents,
-                tokenizer=tokenizer,
-                gold_starts_all=gold_starts_all,
-                gold_ends_all=gold_ends_all,
-                gold_cluster_ids_all=gold_cluster_ids_all,
-                max_span_width=config["max_span_width"],
-                genre=genre,
-                speakers=speakers_norm,
-            )
+        logits, mention_labels, loss = model.forward_document(
+            sentences=sentences,
+            tokenizer=tokenizer,
+            gold_starts_all=gold_starts_all,
+            gold_ends_all=gold_ends_all,
+            gold_cluster_ids_all=gold_cluster_ids_all,
+            max_span_width=config["max_span_width"],
+            genre=genre,
+            speakers=speakers_norm,
+        )
 
-            if logits.numel() == 0:
-                continue
+        if logits.numel() == 0:
+            continue  # documento vazio, pula
 
-            #acumula loss 
-            if loss is not None and torch.is_tensor(loss) and loss.requires_grad:
-                doc_total_loss = doc_total_loss + loss
+        if loss is not None and torch.is_tensor(loss) and loss.requires_grad:
+            doc_total_loss = doc_total_loss + loss
 
-            #métricas 
-            with torch.no_grad():
-                probs = torch.sigmoid(logits)
-                preds = (probs >= 0.5).long()
-                doc_correct += (preds == mention_labels).sum().item()
-                doc_spans += mention_labels.numel()
+        with torch.no_grad():
+            probs = torch.sigmoid(logits)
+            preds = (probs >= 0.5).long()
+            doc_correct += (preds == mention_labels).sum().item()
+            doc_spans   += mention_labels.numel()
+
 
         #update uma vez no final do documento
         if doc_spans > 0:
@@ -196,31 +190,28 @@ def train_epoch_multi(model, datasets, tokenizer, config, optimizer, device,
         optimizer.zero_grad(set_to_none=True)
         doc_total_loss = torch.tensor(0.0, device=device)
 
-        for seg_start, seg_sents in sentence_chunks(sentences, config["max_segment_len"]):
-            logits, mention_labels, loss = model.forward(
-                sentences=sentences,
-                seg_start=seg_start,
-                seg_sents=seg_sents,
-                tokenizer=tokenizer,
-                gold_starts_all=gold_starts_all,
-                gold_ends_all=gold_ends_all,
-                gold_cluster_ids_all=gold_cluster_ids_all,
-                max_span_width=config["max_span_width"],
-                genre=genre,
-                speakers=speakers_norm,
-            )
+        logits, mention_labels, loss = model.forward_document(
+            sentences=sentences,
+            tokenizer=tokenizer,
+            gold_starts_all=gold_starts_all,
+            gold_ends_all=gold_ends_all,
+            gold_cluster_ids_all=gold_cluster_ids_all,
+            max_span_width=config["max_span_width"],
+            genre=genre,
+            speakers=speakers_norm,
+        )
 
-            if logits.numel() == 0:
-                continue
+        if logits.numel() == 0:
+            continue
 
-            if loss is not None and torch.is_tensor(loss) and loss.requires_grad:
-                doc_total_loss = doc_total_loss + loss
+        if loss is not None and torch.is_tensor(loss) and loss.requires_grad:
+            doc_total_loss = doc_total_loss + loss
 
-            with torch.no_grad():
-                probs = torch.sigmoid(logits)
-                preds = (probs >= 0.5).long()
-                doc_correct += (preds == mention_labels).sum().item()
-                doc_spans += mention_labels.numel()
+        with torch.no_grad():
+            probs = torch.sigmoid(logits)
+            preds = (probs >= 0.5).long()
+            doc_correct += (preds == mention_labels).sum().item()
+            doc_spans += mention_labels.numel()
 
         if doc_spans > 0:
             doc_total_loss.backward()
@@ -294,7 +285,7 @@ def main():
         "pair_ffnn_size": 1000,
         "use_speakers": True,
         "speaker_emb_size": 20, #tamanho do emb de speaker
-        "max_training_sentences": args.max_segment_len,  
+        "max_training_sentences": 50,  
     }
     config["max_seq_length"] = args.max_seq_length
     
@@ -399,93 +390,81 @@ def main():
         genre = ex.get("genre", None)
 
         with torch.no_grad():
-            for seg_start, seg_sents in sentence_chunks(sentences, config["max_segment_len"]):
-                logits, mention_labels, loss = model.forward(
-                    sentences=sentences,
-                    seg_start=seg_start,
-                    seg_sents=seg_sents,
-                    tokenizer=tokenizer,
-                    gold_starts_all=gold_starts_all,
-                    gold_ends_all=gold_ends_all,
-                    gold_cluster_ids_all=gold_cluster_ids_all,
-                    max_span_width=config["max_span_width"],
-                    genre=genre,
-                    speakers=speakers_norm,
-                    return_debug=True,
-                )
+            logits, mention_labels, loss = model.forward_document(
+                sentences=sentences,
+                tokenizer=tokenizer,
+                gold_starts_all=gold_starts_all,
+                gold_ends_all=gold_ends_all,
+                gold_cluster_ids_all=gold_cluster_ids_all,
+                max_span_width=config["max_span_width"],
+                genre=genre,
+                speakers=speakers_norm,
+                return_debug=True,
+            )
 
-                dbg = getattr(model, "last_debug", None)
-                if dbg is None or dbg["span_starts_tok"] is None:
-                    print(f"\nSegment {seg_start}: (sem spans no beam)")
-                    continue
+        dbg = getattr(model, "last_debug", None)
+        if dbg is None or dbg["span_starts_tok"] is None:
+            print("(sem spans no beam)")
+            return
 
-                probs = torch.sigmoid(logits).detach().cpu()
-                starts = dbg["span_starts_tok"].numpy().tolist()
-                ends   = dbg["span_ends_tok"].numpy().tolist()
-                pair   = dbg["pair_scores"].numpy()
+        probs = torch.sigmoid(logits).detach().cpu()
+        starts = dbg["span_starts_tok"].numpy().tolist()
+        ends   = dbg["span_ends_tok"].numpy().tolist()
+        pair   = dbg["pair_scores"].numpy()
+        
+        all_tokens = [tok for sent in sentences for tok in sent]
+        topk = min(10, len(probs))
+        vals, idxs = torch.topk(probs, k=topk)
+        print(f"\nTop probs: {[round(float(v),3) for v in vals]}")
+
+        kept = [i for i, p in enumerate(probs.tolist()) if float(p) >= thresh]
+        print(f"\nSpans no beam: {len(probs)} | kept>={thresh}: {len(kept)}")
+
+        if len(kept) == 0:
+            for i in idxs.tolist():
+                s, e = starts[i], ends[i]
+                txt = " ".join(all_tokens[s:e+1]) if 0 <= s <= e < len(all_tokens) else "(fora do range)"
+                print(f"  TOP span[{i:3d}] prob={float(probs[i]):.3f} tok=({s},{e}) text='{txt}'")
+            return
+
+        for i in kept[:20]:
+            s, e = starts[i], ends[i]
+            txt = " ".join(all_tokens[s:e+1]) if 0 <= s <= e < len(all_tokens) else "(fora do range)"
+            print(f"  span[{i:3d}] prob={float(probs[i]):.3f} tok=({s},{e}) text='{txt}'")
+
+        links = []
+        for i in kept:
+            if i == 0:
+                continue
+            row = pair[i]
+            best_j = -1
+            best_score = 0.0
+            for j in range(i):
+                if j in kept and row[j] > best_score:
+                    best_score = row[j]
+                    best_j = j
+            if best_j >= 0:
+                links.append((i, best_j))
+
+        print("\nLinks (span_i -> antecedente_j) com score>0:")
+        for i, j in links[:30]:
+            print(f"  {i} -> {j}  score={pair[i][j]:.3f}")
+
+        clusters = union_find_clusters(len(probs), links)
+        clusters = [[x for x in c if x in kept] for c in clusters]
+        clusters = [c for c in clusters if len(c) >= 2]
+
+        print("\nClusters (apenas size>=2):")
+        if not clusters:
+            print("  (nenhum cluster com size>=2)")
+        for k, c in enumerate(clusters, 1):
+            pieces = []
+            for idx in c:
+                s, e = starts[idx], ends[idx]
+                txt = " ".join(all_tokens[s:e+1]) if 0 <= s <= e < len(all_tokens) else "(fora do range)"
+                pieces.append(f"{idx}:{txt}")
+            print(f"  Cluster {k}: " + " | ".join(pieces))        
                 
-                #debug extra. mostrar top spans mesmo se threshold n for passado
-                topk = min(10, len(probs))
-                vals, idxs = torch.topk(probs, k=topk)
-                print("Top probs:", [float(v) for v in vals])
-
-
-                # tokens do segmento
-                seg_tokens = [w for sent in seg_sents for w in sent]
-
-                # spans acima do threshold
-                kept = [i for i,p in enumerate(probs) if float(p) >= thresh]
-                print(f"\nSEGMENT start={seg_start} | spans_no_beam={len(probs)} | kept>={thresh} = {len(kept)}")
-                if len(kept) == 0:
-                    # mostra os top-10 spans mesmo sem passar o threshold
-                    for i in idxs.tolist():
-                        s,e = starts[i], ends[i]
-                        txt = " ".join(seg_tokens[s:e+1]) if 0 <= s <= e < len(seg_tokens) else "(fora do range)"
-                        print(f"  TOP span[{i:3d}] prob={float(probs[i]):.3f} tok=({s},{e}) text='{txt}'")
-                    continue
-
-                # imprimir spans
-                for i in kept[:20]:
-                    s,e = starts[i], ends[i]
-                    if 0 <= s <= e < len(seg_tokens):
-                        txt = " ".join(seg_tokens[s:e+1])
-                    else:
-                        txt = "(fora do range)"
-                    print(f"  span[{i:3d}] prob={float(probs[i]):.3f} tok=({s},{e}) text='{txt}'")
-
-                # links: melhor antecedente com score > 0
-                links = []
-                for i in kept:
-                    if i == 0:
-                        continue
-                    row = pair[i][:i]
-                    j = int(row.argmax()) if len(row) > 0 else -1
-                    if j >= 0 and row[j] > 0:
-                        links.append((i, j))
-
-                print("\nLinks (span_i -> antecedente_j) com score>0:")
-                for i,j in links[:30]:
-                    print(f"  {i} -> {j}  score={pair[i][j]:.3f}")
-
-                clusters = union_find_clusters(len(probs), links)
-                # só clusters que têm pelo menos 2 spans e estão no kept
-                clusters = [
-                    [x for x in c if x in kept]
-                    for c in clusters
-                ]
-                clusters = [c for c in clusters if len(c) >= 2]
-
-                print("\nClusters (apenas size>=2):")
-                if not clusters:
-                    print("  (nenhum cluster com size>=2)")
-                for k,c in enumerate(clusters, 1):
-                    pieces = []
-                    for idx in c:
-                        s,e = starts[idx], ends[idx]
-                        txt = " ".join(seg_tokens[s:e+1]) if 0 <= s <= e < len(seg_tokens) else "(fora do range)"
-                        pieces.append(f"{idx}:{txt}")
-                    print(f"  Cluster {k}: " + " | ".join(pieces))
-
     if args.inspect:
         # escolhe o split certo
         if args.split == "train":

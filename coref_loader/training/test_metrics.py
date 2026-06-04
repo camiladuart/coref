@@ -206,16 +206,8 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0, me
             raw_speakers = normalize_speakers_for_doc(ex.get("speakers", None), sentences)
             gold_starts_all, gold_ends_all, gold_cluster_ids_all = extract_gold_spans_with_clusters(ex)
             genre = ex.get("genre", None)
-
-            #add memória cross-segment (lembrar+relacionar span seg 1 com 2)
-            memory_span_emb = []
-            memory_mention_scores = []
-            memory_segment_ids = []
-            memory_beam_pred_ids = []
-            memory_beam_sizes = []
-            memory_speaker_ids = [] 
             
-            #gold clusters (start,end)
+            #gold clusters 
             gold_by_cid = {}
             for s, e, cid in zip(gold_starts_all.tolist(),
                                 gold_ends_all.tolist(),
@@ -233,197 +225,56 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0, me
                 print("\n===== DOC 0 checando =====", flush=True)
                 print("Exemplo gold mentions:", gold_mentions[:20], flush=True)
 
-            sent_lens = [len(s) for s in sentences]
-            sent_prefix = [0] #sent_prefix[k] = tokens antes da sentence k
-            for L in sent_lens:
-                sent_prefix.append(sent_prefix[-1] + L)
-        
+            logits, mention_labels, loss = model.forward_document(
+                sentences=sentences,
+                tokenizer=tokenizer,
+                gold_starts_all=gold_starts_all,
+                gold_ends_all=gold_ends_all,
+                gold_cluster_ids_all=gold_cluster_ids_all,
+                max_span_width=config["max_span_width"],
+                genre=genre,
+                speakers=raw_speakers,
+                return_debug=True,
+            )
 
-            pred_mentions = []   #spans pred em lista
-            pred_links = []  #links entre índices dessa lista (i->j)
+            if logits.numel() == 0:
+                continue
 
-            for seg_start, seg_sents in sentence_chunks(sentences, config["max_segment_len"]):
-                logits, mention_labels, loss = model.forward(
-                    sentences=sentences,
-                    seg_start=seg_start,
-                    seg_sents=seg_sents,
-                    tokenizer=tokenizer,
-                    gold_starts_all=gold_starts_all,
-                    gold_ends_all=gold_ends_all,
-                    gold_cluster_ids_all=gold_cluster_ids_all,
-                    max_span_width=config["max_span_width"],
-                    genre=genre,
-                    speakers=raw_speakers,
-                    return_debug=True,
-                )
+            dbg = model.last_debug
+            probs = torch.sigmoid(logits).detach().cpu().tolist()
+            starts_all = dbg["span_starts_tok"].tolist()
+            ends_all   = dbg["span_ends_tok"].tolist()
 
-                dbg = getattr(model, "last_debug", None)
-                if dbg is None:
+            pred_mentions = []
+            pred_links    = []
+            beam_to_pred  = {}
+
+            for i, (s, e, p) in enumerate(zip(starts_all, ends_all, probs)):
+                if p >= mention_thresh:
+                    beam_to_pred[i] = len(pred_mentions)
+                    pred_mentions.append((s, e))
+
+            # antecedentes: ler directamente de pair_scores (já calculado globalmente)
+            pair_scores_full = dbg["pair_scores"]  # tensor [N_beam, N_beam]
+            N_beam = pair_scores_full.size(0)
+
+            for i in range(N_beam):
+                if i not in beam_to_pred:
                     continue
-
-                curr_span_emb = dbg["span_emb"]
-                curr_mention_scores = dbg["mention_scores"]
-                curr_segment_ids = dbg["span_segment_ids"]
-    
-                #spans do beam (indices em tokens do segmento)
-                starts_seg = dbg["span_starts_tok"].detach().cpu().tolist()
-                ends_seg   = dbg["span_ends_tok"].detach().cpu().tolist()
-                
-                #alteraçao: extraindo speaker ids do beam para este segmento (cross segment speaker propagation)
-                curr_speaker_ids = None
-                if model.use_speakers:
-                    if raw_speakers is not None:
-                        #vocab do documento inteiro — mesmo que model.forward 
-                        doc_speaker_flat = [spk for sent_spk in raw_speakers for spk in sent_spk]
-                        doc_unique_spk = list(dict.fromkeys(doc_speaker_flat))
-                        doc_spk_to_id = {s: idx for idx, s in enumerate(doc_unique_spk)}
-
-                        #lista plana só do segmento atual
-                        seg_sents_local = seg_sents
-                        seg_speaker_flat = [
-                            spk
-                            for sent_idx, sent_spk in enumerate(raw_speakers)
-                            if seg_start <= sent_idx < seg_start + len(seg_sents_local)
-                            for spk in sent_spk
-                        ]
-                        raw_ids = []
-                        for s in starts_seg:
-                            if 0 <= s < len(seg_speaker_flat):
-                                raw_ids.append(doc_spk_to_id.get(seg_speaker_flat[s], -1))
-                            else:
-                                raw_ids.append(-1)
-                        curr_speaker_ids = torch.tensor(raw_ids, dtype=torch.long, device=curr_span_emb.device)
-
-                #offset de tokens antes deste segmento no doc
-                seg_token_offset = sent_prefix[seg_start]
-                
-                probs = torch.sigmoid(logits).detach().cpu().tolist()
-                beam_to_pred = {}   #índice do beam -> índice em pred_mentions
-                for i, (s, e, p) in enumerate(zip(starts_seg, ends_seg, probs)):
-                    if p >= mention_thresh:
-                        beam_to_pred[i] = len(pred_mentions)
-                        pred_mentions.append((seg_token_offset + s, seg_token_offset + e))
-
-                if doc_i == 0 and seg_start == 0:
-                    top = sorted([(p,i) for i,p in enumerate(probs)], reverse=True)[:10]
-                    print("\nTop10 mention probs (prob, idx):", top)
-                    print("Exemplo spans (idx, start,end,prob):")
-                    for p,i in top[:5]:
-                        print(i, starts_seg[i], ends_seg[i], p)
-                        
-                beam_pred_ids = [-1] * len(starts_seg)
-                for i in range(len(starts_seg)):
-                    if i in beam_to_pred:
-                        beam_pred_ids[i] = beam_to_pred[i]
-
-                #links: para cada span do beam, escolher melhor antecedente entre spans do seg atual e spans de segs anteriores
-                curr_beam_size = len(starts_seg)
-
-                #scores intra-segmento já calculados pelo modelo 
-                intra_scores = dbg["pair_scores"].detach().cpu().numpy() 
-
-                for i in range(curr_beam_size):
-                    if i not in beam_to_pred:
-                        continue
-                    best_score = 0.0
-                    best_pred_idx = -1
-
-                    #1.antecedentes no mesmo segmento (intra)iterar do melhor para o pior
-                    if i > 0:
-                        row_intra = intra_scores[i][:i]
-                        sorted_j = np.argsort(-row_intra)   #índices ordenados do maior score para o menor
-                        for j_intra in sorted_j:
-                            if row_intra[j_intra] <= best_score:
-                                break   #os restantes são ainda piores, não vale a pena continuar
-                            if j_intra in beam_to_pred:
-                                best_score = row_intra[j_intra]
-                                best_pred_idx = beam_to_pred[j_intra]
-                                break   #encontrou o melhor antecedente válido, para
-
-                    #2.antecedentes em segmentos anteriores (cross-segment)
-                    #calcula só as interações: span_i atual vs. todos os spans anteriores
-                    if len(memory_span_emb) > 0:
-                        prev_span_emb_cat = torch.cat(memory_span_emb, dim=0)      
-                        prev_scores_cat   = torch.cat(memory_mention_scores, dim=0) 
-                        prev_seg_ids_cat  = torch.cat(memory_segment_ids, dim=0)   
-
-                        curr_emb_i = curr_span_emb[i].unsqueeze(0).to(prev_span_emb_cat.device)  
-                        D = curr_emb_i.size(-1)
-                        prev_total = prev_span_emb_cat.size(0)
-
-                        #broadcasting só para 1 span vs. todos os anteriores 
-                        emb_i_exp = curr_emb_i.expand(prev_total, D)
-                        emb_j_exp = prev_span_emb_cat
-
-                        #distância de segmento
-                        seg_i_val = curr_segment_ids[i].item()
-                        seg_j_vals = prev_seg_ids_cat
-                        seg_dist = (torch.full_like(seg_j_vals, seg_i_val) - seg_j_vals)
-                        seg_dist = seg_dist.clamp(0, model.max_training_sentences - 1)
-                        seg_emb_cross = model.segment_distance_embeddings(seg_dist) 
-
-                        cross_feats = [emb_i_exp, emb_j_exp, emb_i_exp * emb_j_exp, seg_emb_cross]
-
-                        if model.use_speakers:
-                            prev_spk_cat = torch.cat(memory_speaker_ids, dim=0)  #speaker ids de todos os spans anteriores
-                            spk_i_val = curr_speaker_ids[i].item() if curr_speaker_ids is not None else -1
-
-                            if spk_i_val < 0:
-                                #speaker atual desconhecido: tudo desconhecido
-                                spk_label = torch.full((prev_total,), 2, dtype=torch.long,
-                                                    device=prev_span_emb_cat.device)
-                            else:
-                                same    = (prev_spk_cat == spk_i_val).long()
-                                unknown = (prev_spk_cat < 0).long()
-                                spk_label = torch.where(
-                                    unknown == 1,
-                                    torch.full_like(same, 2),
-                                    1 - same    #0 = mesmo speaker, 1 = diferente
-                                )
-                            spk_emb_cross = model.speaker_embeddings(spk_label.to(prev_span_emb_cat.device))
-                            cross_feats.append(spk_emb_cross)
-
-                        pair_input_cross = torch.cat(cross_feats, dim=-1)  
-
-                        with torch.no_grad():
-                            cross_scores = model.pair_scorer(pair_input_cross).squeeze(-1)  
-                        cross_scores = cross_scores + curr_mention_scores[i] + prev_scores_cat
-                        cross_scores = cross_scores.detach().cpu().numpy()
-
-                        #cross-segment: iterar do melhor para o pior até encontrar antecedente válido
-                        sorted_cross = np.argsort(-cross_scores)
-                        for best_j_cross in sorted_cross:
-                            if cross_scores[best_j_cross] <= best_score:
-                                break   #os restantes são ainda piores
-                            #mapear best_j_cross -> pred_idx
-                            tmp = best_j_cross
-                            seg_k = 0
-                            while seg_k < len(memory_beam_sizes) and tmp >= memory_beam_sizes[seg_k]:
-                                tmp -= memory_beam_sizes[seg_k]
-                                seg_k += 1
-                            if seg_k < len(memory_beam_pred_ids):
-                                prev_pred_idx = memory_beam_pred_ids[seg_k][tmp]
-                                if prev_pred_idx != -1:
-                                    best_score = cross_scores[best_j_cross]
-                                    best_pred_idx = prev_pred_idx
-                                    break   #encontrou antecedente válido
-
-                    if best_pred_idx != -1:
-                        pred_links.append((beam_to_pred[i], best_pred_idx))
-
-                memory_span_emb.append(curr_span_emb)
-                memory_mention_scores.append(curr_mention_scores)
-                memory_segment_ids.append(curr_segment_ids)
-                memory_beam_pred_ids.append(beam_pred_ids)
-                memory_beam_sizes.append(curr_beam_size)
-                # guardar speaker ids — fallback para tensor de -1 se não disponível
-                if curr_speaker_ids is not None:
-                    memory_speaker_ids.append(curr_speaker_ids)
-                else:
-                    memory_speaker_ids.append(
-                        torch.full((curr_beam_size,), -1, dtype=torch.long,
-                                device=curr_span_emb.device)
-                    )               
+                row = pair_scores_full[i]
+                sorted_j = torch.argsort(row, descending=True)
+                best_score = 0.0
+                best_pred_idx = -1
+                for j in sorted_j.tolist():
+                    score = row[j].item()
+                    if score <= best_score:
+                        break
+                    if j in beam_to_pred and j < i:
+                        best_score = score
+                        best_pred_idx = beam_to_pred[j]
+                        break
+                if best_pred_idx != -1:
+                    pred_links.append((beam_to_pred[i], best_pred_idx))
             
             #debug:
             if doc_i == 0:

@@ -344,6 +344,268 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
 
         return logits, mention_labels, loss
     
+    #Implementação do pooling: Divide o documento em segmentos de <= max_seq_length wordpieces (nunca trunca),
+    #codifica cada segmento, e corre uma etapa de antecedente global sobre todos os spans do documento:
+    def forward_document(
+        self,
+        *,
+        sentences,
+        tokenizer,
+        gold_starts_all: torch.Tensor,
+        gold_ends_all: torch.Tensor,
+        gold_cluster_ids_all,
+        max_span_width: int = 30,
+        genre=None,
+        speakers=None,
+        return_debug: bool = False,
+    ):
+        
+        device = next(self.parameters()).device
+        max_seq_len = self.config.get("max_seq_length", 512)
+
+        #Passo 1: dividir documento em segmentos por orçamento de WPs, nao por número de frases — evita truncagem)
+        segments = []          # cada entry: (sent_start_idx, sent_end_idx_excl, tokens, wp_ids)
+        current_tokens = []
+        current_sent_start = 0
+        current_sent_end = 0
+
+        for sent_idx, sent in enumerate(sentences):
+            # tentativa: adicionar esta frase ao segmento atual
+            candidate = current_tokens + sent
+            enc_test = tokenizer(
+                candidate,
+                is_split_into_words=True,
+                add_special_tokens=False,
+                truncation=False,
+                return_tensors="pt",
+            )
+            if enc_test["input_ids"].size(1) > max_seq_len and current_tokens:
+                # esta frase não cabe — fechar segmento atual e começar novo
+                segments.append((current_sent_start, current_sent_end, current_tokens))
+                current_tokens = sent
+                current_sent_start = sent_idx
+                current_sent_end = sent_idx + 1
+            else:
+                current_tokens = candidate
+                current_sent_end = sent_idx + 1
+
+        if current_tokens:
+            segments.append((current_sent_start, current_sent_end, current_tokens))
+
+        if not segments:
+            empty = torch.empty(0, device=device)
+            return empty, empty.long(), torch.tensor(0.0, device=device)
+
+        #Passo 2: codificar cada segmento e recolher embeddings de token
+        all_token_emb = []   
+        token_offset = 0     
+
+        for seg_sent_start, seg_sent_end, seg_tokens in segments:
+            enc = tokenizer(
+                seg_tokens,
+                is_split_into_words=True,
+                add_special_tokens=False,
+                truncation=False,   # NUNCA trunca — o orçamento já garantiu que cabe
+                return_tensors="pt",
+            )
+            input_ids = enc["input_ids"].to(device)
+            attention_mask = enc["attention_mask"].to(device)
+            T_wp = input_ids.size(1)
+
+            outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
+            token_emb_wp = self.dropout(outputs.last_hidden_state.squeeze(0))  # [T_wp, H]
+
+            # mapear WP -> token: pegar o primeiro WP de cada token
+            try:
+                wp2tok = enc.word_ids(0)
+            except Exception:
+                wp2tok = enc.encodings[0].word_ids
+
+            n_tok = len(seg_tokens)
+            first_wp = [-1] * n_tok
+            last_wp  = [-1] * n_tok
+            for wp_i in range(T_wp):
+                tok_i = wp2tok[wp_i]
+                if tok_i is None:
+                    continue
+                if first_wp[tok_i] == -1:
+                    first_wp[tok_i] = wp_i
+                last_wp[tok_i] = wp_i
+
+            # representação por token = embedding do primeiro WP do token
+            tok_embs = []
+            for t in range(n_tok):
+                if first_wp[t] != -1:
+                    tok_embs.append(token_emb_wp[first_wp[t]])
+                else:
+                    tok_embs.append(torch.zeros(token_emb_wp.size(-1), device=device, dtype=token_emb_wp.dtype))
+            tok_embs = torch.stack(tok_embs, dim=0)  
+
+            all_token_emb.append(tok_embs)
+
+            # guardar first_wp/last_wp para uso na construção de spans
+            segments[len(all_token_emb) - 1] = (seg_sent_start, seg_sent_end, seg_tokens, first_wp, last_wp, token_offset, T_wp, enc)
+
+            token_offset += n_tok
+
+        all_token_emb_cat = torch.cat(all_token_emb, dim=0)  
+
+        #Passo 3: construir candidatos a span ao nível do documento
+        all_span_starts = []
+        all_span_ends   = []
+        all_span_segment_ids = []
+
+        doc_offset = 0  # offset de token dentro do documento inteiro
+
+        for seg_idx, seg_data in enumerate(segments):
+            seg_sent_start, seg_sent_end, seg_tokens, first_wp, last_wp, tok_off, T_wp, enc = seg_data
+            seg_sents = sentences[seg_sent_start:seg_sent_end]
+
+            # sentence_map para este segmento
+            from coref_loader.data import flatten_sentences, build_candidates
+            _, sentence_map = flatten_sentences(seg_sents)
+            span_s, span_e = build_candidates(sentence_map, max_span_width)
+
+            # filtrar spans cujos WPs estão dentro do segmento
+            for s, e in zip(span_s.tolist(), span_e.tolist()):
+                fs, le = first_wp[s], last_wp[e]
+                if 0 <= fs <= le < T_wp:
+                    all_span_starts.append(s + doc_offset)
+                    all_span_ends.append(e + doc_offset)
+                    all_span_segment_ids.append(seg_sent_start)
+
+            doc_offset += len(seg_tokens)
+
+        if not all_span_starts:
+            empty = torch.empty(0, device=device)
+            return empty, empty.long(), torch.tensor(0.0, device=device)
+
+        span_starts_tok = torch.tensor(all_span_starts, dtype=torch.long, device=device)
+        span_ends_tok   = torch.tensor(all_span_ends,   dtype=torch.long, device=device)
+        span_segment_ids = torch.tensor(all_span_segment_ids, dtype=torch.long, device=device)
+
+        #Passo 4: construir span embeddings 
+        N_spans = span_starts_tok.size(0)
+
+        start_vecs = all_token_emb_cat[span_starts_tok]
+        end_vecs   = all_token_emb_cat[span_ends_tok]
+
+        span_widths = (span_ends_tok - span_starts_tok + 1).clamp(1, self.max_span_width)
+        width_vecs  = self.span_width_embeddings(span_widths - 1)
+
+        # head attention usando all_token_emb_cat
+        max_w = self.max_span_width
+        offsets = torch.arange(max_w, device=device).unsqueeze(0)
+        span_indices = span_starts_tok.unsqueeze(1) + offsets
+        span_indices_clamped = span_indices.clamp(0, all_token_emb_cat.size(0) - 1)
+        span_token_embs = all_token_emb_cat[span_indices_clamped]  
+        span_mask = span_indices <= span_ends_tok.unsqueeze(1)
+        raw_scores = self.head_attention(span_token_embs).squeeze(-1)
+        raw_scores = raw_scores.masked_fill(~span_mask, -1e9)
+        attn_weights = torch.softmax(raw_scores, dim=-1)
+        head_vecs = (attn_weights.unsqueeze(-1) * span_token_embs).sum(dim=1)
+
+        span_emb = torch.cat([start_vecs, end_vecs, head_vecs, width_vecs], dim=-1)
+
+        if self.use_genre:
+            genre_emb = self.get_genre_embedding(genre, device, span_emb.dtype)
+            if genre_emb is None:
+                genre_emb = torch.zeros(self.config["genre_emb_size"], device=device, dtype=span_emb.dtype)
+            span_emb = torch.cat([span_emb, genre_emb.unsqueeze(0).expand(N_spans, -1)], dim=-1)
+
+        span_emb = self.dropout(span_emb)
+
+        #Passo 5: mention scoring e beam (global, não por segmento)
+        mention_scores = self.get_mention_scores(span_emb)
+        num_words = all_token_emb_cat.size(0)
+        top_span_ratio = self.config.get("top_span_ratio", 0.4)
+        k = max(1, min(3900, int(num_words * top_span_ratio), N_spans))
+        c = min(self.config.get("max_top_antecedents", 50), k)
+
+        top_scores, top_indices = torch.topk(mention_scores, k)
+
+        # ordenar por posição no documento
+        sort_order = torch.argsort(
+            span_starts_tok[top_indices] * (num_words + 1) + span_ends_tok[top_indices]
+        )
+        top_indices    = top_indices[sort_order]
+        top_scores     = top_scores[sort_order]
+
+        span_emb_beam        = span_emb[top_indices]
+        mention_scores_beam  = mention_scores[top_indices]
+        span_starts_beam     = span_starts_tok[top_indices]
+        span_ends_beam       = span_ends_tok[top_indices]
+        span_segment_beam    = span_segment_ids[top_indices]
+
+        #Passo 6: labels
+        if gold_starts_all.numel() > 0:
+            mention_labels_beam = self.get_candidate_labels(
+                span_starts_beam, span_ends_beam, gold_starts_all.to(device), gold_ends_all.to(device)
+            )
+            candidate_cluster_ids_beam = self.get_candidate_cluster_ids(
+                span_starts_beam, span_ends_beam,
+                gold_starts_all.to(device), gold_ends_all.to(device),
+                gold_cluster_ids_all.to(device)
+            )
+        else:
+            mention_labels_beam       = torch.zeros(k, dtype=torch.long, device=device)
+            candidate_cluster_ids_beam = torch.zeros(k, dtype=torch.long, device=device)
+
+        # speakers
+        beam_speaker_ids = None
+        if self.use_speakers and speakers is not None:
+            doc_speaker_flat = [spk for sent_spk in speakers for spk in sent_spk]
+            doc_unique_spk   = list(dict.fromkeys(doc_speaker_flat))
+            doc_spk_to_id    = {s: idx for idx, s in enumerate(doc_unique_spk)}
+            raw_ids = []
+            for s in span_starts_beam.tolist():
+                if 0 <= s < len(doc_speaker_flat):
+                    raw_ids.append(doc_spk_to_id.get(doc_speaker_flat[s], -1))
+                else:
+                    raw_ids.append(-1)
+            beam_speaker_ids = torch.tensor(raw_ids, dtype=torch.long, device=device)
+
+        #Passo 7: pair scoring global (UMA passagem, não por segmento)
+        pair_scores = self.score_span_pairs(
+            span_emb_beam, span_segment_beam, mention_scores_beam,
+            speaker_ids=beam_speaker_ids
+        )
+
+        top_ant_scores, top_ant_idx = torch.topk(pair_scores, k=c, dim=1)
+        logits = top_scores
+
+        #Passo 8: loss
+        loss = torch.zeros((), device=device, dtype=mention_scores.dtype)
+
+        if mention_labels_beam.numel() > 0:
+            n_pos = mention_labels_beam.sum().float().clamp(min=1.0)
+            n_neg = (mention_labels_beam == 0).sum().float().clamp(min=1.0)
+            pos_weight = (n_neg / n_pos).clamp(max=20.0)
+            mention_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+                logits, mention_labels_beam.float(), pos_weight=pos_weight
+            )
+            loss = loss + mention_loss
+
+        if candidate_cluster_ids_beam.numel() > 0:
+            loss = loss + self.coref_marginal_loss_with_dummy(
+                top_ant_scores, top_ant_idx, candidate_cluster_ids_beam
+            )
+
+        if return_debug:
+            self.last_debug = {
+                "top_scores":       top_scores.detach().cpu(),
+                "span_starts_tok":  span_starts_beam.detach().cpu(),
+                "span_ends_tok":    span_ends_beam.detach().cpu(),
+                "pair_scores":      pair_scores.detach().cpu(),
+                "span_emb":         span_emb_beam.detach(),
+                "mention_scores":   mention_scores_beam.detach(),
+                "span_segment_ids": span_segment_beam.detach(),
+            }
+        else:
+            self.last_debug = None
+
+        return logits, mention_labels_beam, loss
+        
     def forward(
         self,
         *,
