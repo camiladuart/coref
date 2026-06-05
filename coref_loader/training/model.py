@@ -888,11 +888,15 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
 
         #comparando os candidatos com os gold: eq[i,j] = True se cand[i] == gold[j]
         eq = (cand[:, None, :] == gold[None, :, :]).all(dim=-1)  # [N, M]
-        #transformando para boolean
-        matched = eq.long()
+        # Pegar o cluster_id do gold que bate com cada candidato.
+        # Não usar "matched @ gold_cluster_ids" porque matmul com Long na CUDA quebra:
+        # RuntimeError: "addmv_impl_cuda" not implemented for 'Long'
+        has_match = eq.any(dim=1)
+        cluster_ids = torch.zeros(N, dtype=torch.long, device=device)
 
-        #multiplicação p pegar o cluster do span que bate com o gold (só 0 ou o id do cluster correto)
-        cluster_ids = matched @ gold_cluster_ids.to(device)
+        if has_match.any():
+            match_idx = eq.float().argmax(dim=1)
+            cluster_ids[has_match] = gold_cluster_ids.to(device).long()[match_idx[has_match]]
 
         return cluster_ids
     

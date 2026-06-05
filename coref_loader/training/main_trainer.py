@@ -275,7 +275,7 @@ def main():
         "encoder_name": args.encoder_name,
         "max_span_width": args.max_span_width,
         "max_segment_len": args.max_segment_len,
-        "top_span_ratio": 0.3,
+        "top_span_ratio": 0.1,
         "max_top_antecedents": 50,
         "use_genre": False, 
         "genres": [],
