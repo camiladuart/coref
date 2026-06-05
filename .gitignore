@@ -1,0 +1,18 @@
+
+# Python/cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Local environments
+.venv*/
+venv/
+env/
+
+# Local tools / external repos
+corefud-scorer/
+
+# Logs and temporary outputs
+logs/
+*.out
+*.err
