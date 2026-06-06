@@ -1,4 +1,5 @@
 import argparse
+import os
 from pathlib import Path
 from collections import defaultdict
 
@@ -8,6 +9,40 @@ from transformers import AutoTokenizer
 from coref_loader.data import CorefDataset, extract_gold_spans_with_clusters
 from coref_loader.training.model import CorefModel
 from coref_loader.training.test_metrics import normalize_speakers_for_doc, union_find
+
+
+def resolve_local_encoder_path(encoder_name):
+    """
+    Resolve um modelo Hugging Face para um snapshot local no cache.
+    Isso evita tentativa de acesso à internet no nó do Slurm.
+    """
+    p = Path(encoder_name)
+    if p.exists():
+        return str(p)
+
+    hf_home = Path(os.environ.get(
+        "HF_HOME",
+        "/projects/F202600026AIVLABDEUCALION/up202000683/hf_cache"
+    ))
+
+    hub_cache = Path(os.environ.get("HUGGINGFACE_HUB_CACHE", hf_home / "hub"))
+
+    model_cache_name = "models--" + encoder_name.replace("/", "--")
+    snapshots_dir = hub_cache / model_cache_name / "snapshots"
+
+    if snapshots_dir.exists():
+        snapshots = [x for x in snapshots_dir.iterdir() if x.is_dir()]
+        if snapshots:
+            # usa o snapshot mais recente
+            snapshots = sorted(snapshots, key=lambda x: x.stat().st_mtime, reverse=True)
+            local_path = snapshots[0]
+            print(f"[LOCAL ENCODER] {encoder_name} -> {local_path}")
+            return str(local_path)
+
+    raise FileNotFoundError(
+        f"Could not find local Hugging Face snapshot for {encoder_name}. "
+        f"Checked: {snapshots_dir}"
+    )
 
 
 def predict_one_doc(model, ex, tokenizer, config, device, mention_thresh=0.0):
@@ -292,7 +327,13 @@ def main():
     for key in sorted(config.keys()):
         print(f"  {key}: {config[key]}")
 
-    tokenizer = AutoTokenizer.from_pretrained(config["encoder_name"])
+    # Resolve encoder para caminho local no cache, para evitar acesso à internet
+    config["encoder_name"] = resolve_local_encoder_path(config["encoder_name"])
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        config["encoder_name"],
+        local_files_only=True,
+    )
     model = CorefModel(config).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
