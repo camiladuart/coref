@@ -454,6 +454,7 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         all_span_starts = []
         all_span_ends   = []
         all_span_segment_ids = []
+        all_span_seg_idx = []   # índice numérico do segmento (0, 1, 2, ...)
 
         doc_offset = 0  # offset de token dentro do documento inteiro
 
@@ -473,6 +474,7 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
                     all_span_starts.append(s + doc_offset)
                     all_span_ends.append(e + doc_offset)
                     all_span_segment_ids.append(seg_sent_start)
+                    all_span_seg_idx.append(seg_idx)
 
             doc_offset += len(seg_tokens)
 
@@ -480,9 +482,10 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
             empty = torch.empty(0, device=device)
             return empty, empty.long(), torch.tensor(0.0, device=device)
 
-        span_starts_tok = torch.tensor(all_span_starts, dtype=torch.long, device=device)
-        span_ends_tok   = torch.tensor(all_span_ends,   dtype=torch.long, device=device)
+        span_starts_tok  = torch.tensor(all_span_starts,     dtype=torch.long, device=device)
+        span_ends_tok    = torch.tensor(all_span_ends,       dtype=torch.long, device=device)
         span_segment_ids = torch.tensor(all_span_segment_ids, dtype=torch.long, device=device)
+        all_span_segment_ids_raw = torch.tensor(all_span_seg_idx, dtype=torch.long, device=device)
 
         #Passo 4: construir span embeddings 
         N_spans = span_starts_tok.size(0)
@@ -498,8 +501,18 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         offsets = torch.arange(max_w, device=device).unsqueeze(0)
         span_indices = span_starts_tok.unsqueeze(1) + offsets
         span_indices_clamped = span_indices.clamp(0, all_token_emb_cat.size(0) - 1)
-        span_token_embs = all_token_emb_cat[span_indices_clamped]  
-        span_mask = span_indices <= span_ends_tok.unsqueeze(1)
+        span_token_embs = all_token_emb_cat[span_indices_clamped]
+
+        # cortar janela de atenção no limite do segmento do span
+        seg_end_tok = torch.zeros(span_starts_tok.size(0), dtype=torch.long, device=device)
+        for seg_idx, seg_data in enumerate(segments):
+            seg_sent_start, seg_sent_end, seg_tokens, first_wp, last_wp, tok_off, T_wp, enc = seg_data
+            seg_last_tok = tok_off + len(seg_tokens) - 1
+            belongs = (all_span_segment_ids_raw == seg_idx)
+            seg_end_tok[belongs] = seg_last_tok
+
+        span_mask = (span_indices <= span_ends_tok.unsqueeze(1)) & \
+                    (span_indices <= seg_end_tok.unsqueeze(1))
         raw_scores = self.head_attention(span_token_embs).squeeze(-1)
         raw_scores = raw_scores.masked_fill(~span_mask, -1e9)
         attn_weights = torch.softmax(raw_scores, dim=-1)
