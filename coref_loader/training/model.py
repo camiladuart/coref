@@ -1,4 +1,5 @@
 #baseado no independent.py
+import os
 import torch
 import torch.nn as nn
 from transformers import AutoModel
@@ -17,7 +18,8 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         
         hidden_size = self.encoder.config.hidden_size  #guarda o tamanho dos vetores - 768
         self.head_attention = nn.Linear(hidden_size, 1)
-        self.max_span_width = self.config.get("max_span_width", 30) #largura max
+        env_max_span_width = os.environ.get("MAX_SPAN_WIDTH")
+        self.max_span_width = int(env_max_span_width) if env_max_span_width else self.config.get("max_span_width", 30) #largura max
         self.span_width_emb_size = self.config.get("span_width_emb_size", 20) #dim do vetor de largura
         self.span_width_embeddings = nn.Embedding(self.max_span_width, self.span_width_emb_size) #cada largura vira um vetor
         
@@ -242,21 +244,11 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         mention_scores = self.get_mention_scores(span_emb)
         #calculando k 
         num_words = input_ids.size(1) #aproximando pelo nº de tokens
-        top_span_ratio = self.config.get("top_span_ratio", 0.4)
-        max_k = 3900
-        #no independent: k = min(3900, floor(num_words * top_span_ratio))
-        k_float = float(num_words) * float(top_span_ratio)
-        k = int(k_float)          
-        k = min(max_k, k)
-        #k não pode ser 0 nem maior que o num de spans
-        N = mention_scores.size(0)
-        if N == 0:
-            return mention_scores.new_empty(0), mention_labels, mention_scores.new_tensor(0.0)
-        k = max(1, min(k, N)) #nunca menor que 1 ou maior que N
-        #calculando c:
-        #no independent: c = min(max_top_antecedents, k)
-        max_top_antecedents = self.config.get("max_top_antecedents", 50)
-        c = min(max_top_antecedents, k)
+        top_span_ratio = float(os.environ.get("TOP_SPAN_RATIO", self.config.get("top_span_ratio", 0.4)))
+        max_k = int(os.environ.get("MAX_TOP_SPANS", self.config.get("max_top_spans", 3900)))
+        k = max(1, min(max_k, int(float(num_words) * float(top_span_ratio)), N))
+        max_top_antecedents = int(os.environ.get("MAX_TOP_ANTECEDENTS", self.config.get("max_top_antecedents", 50)))
+        c = max(1, min(max_top_antecedents, k))
         #pegando os k maiores scores
         top_scores, top_indices = torch.topk(mention_scores, k)
 
@@ -531,9 +523,11 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
         #Passo 5: mention scoring e beam (global, não por segmento)
         mention_scores = self.get_mention_scores(span_emb)
         num_words = all_token_emb_cat.size(0)
-        top_span_ratio = self.config.get("top_span_ratio", 0.4)
-        k = max(1, min(3900, int(num_words * top_span_ratio), N_spans))
-        c = min(self.config.get("max_top_antecedents", 50), k)
+        top_span_ratio = float(os.environ.get("TOP_SPAN_RATIO", self.config.get("top_span_ratio", 0.4)))
+        max_k = int(os.environ.get("MAX_TOP_SPANS", self.config.get("max_top_spans", 3900)))
+        k = max(1, min(max_k, int(float(num_words) * float(top_span_ratio)), N_spans))
+        max_top_antecedents = int(os.environ.get("MAX_TOP_ANTECEDENTS", self.config.get("max_top_antecedents", 50)))
+        c = max(1, min(max_top_antecedents, k))
 
         top_scores, top_indices = torch.topk(mention_scores, k)
 
