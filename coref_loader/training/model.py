@@ -1,5 +1,6 @@
 #baseado no independent.py
 import os
+from types import SimpleNamespace
 import torch
 import torch.nn as nn
 from transformers import AutoModel
@@ -12,6 +13,11 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
        
         #bert_config -> alterei para Transformers. Encoder BERT:
         self.encoder = AutoModel.from_pretrained(config["encoder_name"]) # carrega modelo pronto (bert-base-cased)
+        if os.environ.get("GRADIENT_CHECKPOINTING", "0") == "1":
+            if hasattr(self.encoder, "gradient_checkpointing_enable"):
+                self.encoder.gradient_checkpointing_enable()
+            if hasattr(self.encoder, "config"):
+                self.encoder.config.use_cache = False
         #add droupout: 
         self.dropout_rate = self.config.get("dropout_rate", 0.3)
         self.dropout = nn.Dropout(self.dropout_rate)
@@ -199,7 +205,7 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
     ) -> torch.Tensor:                    
 
         #pegar spans dos embeddings:
-        outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask) #transformação token -> embedding
+        outputs = self._encode_segments_microbatched(input_ids, attention_mask) #transformação token -> embedding
         token_emb = outputs.last_hidden_state  #pegar os embeddings de cada token
         token_emb = self.dropout(token_emb)
         
@@ -338,6 +344,26 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
     
     #Implementação do pooling: Divide o documento em segmentos de <= max_seq_length wordpieces (nunca trunca),
     #codifica cada segmento, e corre uma etapa de antecedente global sobre todos os spans do documento:
+
+    def _encode_segments_microbatched(self, input_ids, attention_mask):
+        """Encode document segments in small batches to reduce GPU memory."""
+        bsz = int(os.environ.get("ENCODER_BATCH_SIZE", "1"))
+
+        if input_ids.size(0) <= bsz:
+            return self.encoder(input_ids=input_ids, attention_mask=attention_mask)
+
+        hidden_states = []
+
+        for start in range(0, input_ids.size(0), bsz):
+            end = start + bsz
+            out = self.encoder(
+                input_ids=input_ids[start:end],
+                attention_mask=attention_mask[start:end],
+            )
+            hidden_states.append(out.last_hidden_state)
+
+        return SimpleNamespace(last_hidden_state=torch.cat(hidden_states, dim=0))
+
     def forward_document(
         self,
         *,
@@ -404,7 +430,7 @@ class CorefModel(nn.Module): #nn.Module do torch.nn -> lidar com classes com cam
             attention_mask = enc["attention_mask"].to(device)
             T_wp = input_ids.size(1)
 
-            outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
+            outputs = self._encode_segments_microbatched(input_ids, attention_mask)
             token_emb_wp = self.dropout(outputs.last_hidden_state.squeeze(0))  # [T_wp, H]
 
             # mapear WP -> token: pegar o primeiro WP de cada token
