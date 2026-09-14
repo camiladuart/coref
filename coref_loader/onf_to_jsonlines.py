@@ -1,7 +1,5 @@
-# onf_to_jsonlines.py -> codigo final!!!
+# onf_to_jsonlines.py
 # converte OntoNotes .onf -> JSONLines (doc_key + sentences)
-# não usa o pacote "on". Funciona em Python 3 (erros anteriores!!!). 
-
 #“PTB” = Penn Treebank: Árvore PTB = representação em parênteses (notação S-expr) da árvore de constituintes de uma sentence
     #porque os arquivos .onf do OntoNotes contêm anotações ricas -> aproveitar as folhas das árvores é uma forma confiável de recuperar a tokenização do corpus.
     #extrai sentenças sem ter que implementar um parser do formato ONF
