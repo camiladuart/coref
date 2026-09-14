@@ -105,7 +105,7 @@ def predict_one_doc(model, ex, tokenizer, config, device, mention_thresh=0.0):
         for j in torch.argsort(row, descending=True).tolist():
             score = float(row[j].item())
 
-            # no teu código anterior, links só entram se score > 0
+            #antecedent links only when pair score is positive
             if score <= 0.0:
                 break
 
