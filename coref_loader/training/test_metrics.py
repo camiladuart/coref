@@ -185,7 +185,7 @@ def muc_counts(clusters, other_m2c):
 #funçao evaluate:
 def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0, mention_thresh=0.0):
     model.eval()
-    #acumuladores globais (eu estava fazendo media por doc -> metricas altas -> alteraçao:)
+    #acumuladores globais 
     total_muc_tp_p = 0
     total_muc_p = 0
     total_muc_tp_r = 0
@@ -289,14 +289,14 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0, me
             overlap = len(pred_set & gold_set)
             if doc_i == 0:
                 print("Overlap pred∩gold (same start, end):", overlap, flush=True)
-                #TESTES (estava dando tudo 0): se eram erros de +1 -1 nos spans start, end:
+                
                 gold_set_end_minus1 = set((s, e-1) for (s, e) in gold_set)
                 overlap2 = len(pred_set & gold_set_end_minus1)
                 print("Overlap se gold_end-1:", overlap2, flush=True)
                 pred_set_end_minus1 = set((s, e-1) for (s, e) in pred_set)
                 overlap3 = len(pred_set_end_minus1 & gold_set)
                 print("Overlap se pred_end-1:", overlap3, flush=True)
-                print("================================\n", flush=True) #deu 0 ent ok 
+                print("================================\n", flush=True) 
 
             # se não tiver menções, vira tudo zero
             if len(pred_mentions) == 0:
@@ -314,7 +314,7 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0, me
             for sent in sentences:
                 doc_tokens.extend(sent)
 
-            #quero ver o primeiro doc
+            
             if doc_i == 0:
                 print("\n========== DEBUG DOC 0 ==========")
 
@@ -334,7 +334,7 @@ def evaluate_test_metrics(model, test_ds, tokenizer, config, device, limit=0, me
 
                 print("\n=================================\n")
             
-            #Calculo das metricas pos alteracoes (sem ser media por doc -> numeros altissimos). MUC:
+            #accumulate muc counts
             tp_p, p = muc_counts(pred_clusters, _flatten_clusters(gold_clusters))
             tp_r, r = muc_counts(gold_clusters, _flatten_clusters(pred_clusters))
             total_muc_tp_p += tp_p
