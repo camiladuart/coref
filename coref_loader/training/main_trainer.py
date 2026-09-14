@@ -258,7 +258,7 @@ def main():
     #depois da analise dos parametros do artigo: learning rate ajustáveis
     ap.add_argument("--bert_lr", type=float, default=2e-5, help="LR do encoder (SpanBERT: 1e-5 ou 2e-5)")
     ap.add_argument("--task_lr", type=float, default=1e-4, help="LR das camadas do task (SpanBERT: 1e-4/2e-4/3e-4)")
-    ap.add_argument("--warmup_ratio", type=float, default=0.1, help="Fração do treino para warmup (default: 10%)") #add learning rate scheduler
+    ap.add_argument("--warmup_ratio", type=float, default=0.1, help="Fração do treino para warmup (default: 0.1)") #add learning rate scheduler: 10%
     
     # arguments multilingual:
     ap.add_argument("--multi_data_dirs", type=str, default=None,
