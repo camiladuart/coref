@@ -83,7 +83,7 @@ def build_candidates(sentence_map: List[int], max_span_width: int) -> Tuple[torc
         return torch.empty(0, dtype=torch.long), torch.empty(0, dtype=torch.long) ##se não encontrou nenhum span, retorna tensores vazios
     return torch.tensor(starts, dtype=torch.long), torch.tensor(ends, dtype=torch.long) #se sim, transforma as listas starts e ends em tensores torch.LongTensor (pra usar no modelo)
 
-def extract_gold_spans(example): #pega clusters do ontonotes e retorna (gold_starts, gold_ends) únicos
+def extract_gold_spans(example): #pega clusters e retorna (gold_starts, gold_ends) únicos
     clusters = example.get("clusters", [])
     gold = sorted({(m[0], m[1]) for c in clusters for m in c})
     if not gold:
