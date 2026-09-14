@@ -1,4 +1,6 @@
-#baseado no independent.py
+# Adapted from https://github.com/mandarjoshi90/coref (independent.py)
+# Original implementation licensed under Apache License 2.0.
+# Modified for the experiments conducted in this thesis.
 import os
 from types import SimpleNamespace
 import torch
