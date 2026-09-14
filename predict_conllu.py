@@ -13,8 +13,7 @@ from coref_loader.training.test_metrics import normalize_speakers_for_doc, union
 
 def resolve_local_encoder_path(encoder_name):
     """
-    Resolve um modelo Hugging Face para um snapshot local no cache.
-    Isso evita tentativa de acesso à internet no nó do Slurm.
+    Resolve a Hugging Face model to a local cached snapshot when available
     """
     p = Path(encoder_name)
     if p.exists():
