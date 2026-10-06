@@ -35,7 +35,7 @@ def convert_semeval_to_jsonlines(input_path, output_path):
     open_mentions = defaultdict(list)
     token_index = 0
 
-    with open(input_path, "r", encoding="utf-8", errors="ignore") as f:
+    with open(input_path, "r", encoding="cp1252") as f:
         for line in f:
             line = line.strip()
 
