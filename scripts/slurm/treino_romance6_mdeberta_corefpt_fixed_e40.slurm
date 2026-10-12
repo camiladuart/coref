@@ -2,7 +2,7 @@
 #SBATCH -A eehpc-dev-2026d06-183g
 #SBATCH -p normal-a100-40
 #SBATCH --gres=gpu:1
-#SBATCH -t 24:00:00
+#SBATCH -t 48:00:00
 #SBATCH --mem=64G
 #SBATCH -c 8
 #SBATCH -J romance6_mdeb_fixed_e40
